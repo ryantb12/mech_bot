@@ -9,73 +9,95 @@
 ## Inter-Board Communication
 | From | To | Interface | Pins (From side) | Pins (To side) | Notes |
 |---|---|---|---|---|---|
-| T-Display S3 #1 | MOTION 2350 Pro | _(e.g. UART)_ | TX: GP_, RX: GP_ | RX: GP8, TX: GP9 | _(baud rate, protocol details)_ |
-| T-Display S3 #2 | MOTION 2350 Pro | _(e.g. I2C)_ | SDA: GP43, SCL: GP44 | SDA: GP20, SCL: GP21 | _(I2C address)_ |
+| T-Display S3 #1 (master) | T-Display S3 #2 (slave) | GPIO pulse | GPIO 10 (SLAVE_PIN) | GPIO 16 (COMMS_PIN, INPUT_PULLDOWN) | Rising-edge pulse advances state |
+| T-Display S3 #1 (master) | MOTION 2350 Pro | GPIO pulse | GPIO 1 (STATE_OUT_PIN) | GP26 (INPUT_PULLDOWN) | Rising-edge pulse advances state |
 
 ---
 
 ## Sensors
 
-### Sensor 1 — _(Name / Model)_
-- **Type:** _(e.g. ultrasonic distance, IMU, line sensor)_
-- **Connected to board:** _(T-Display S3 #1 / #2 / MOTION 2350 Pro)_
-- **Interface:** _(GPIO / I2C / SPI / UART / ADC)_
+### HC-SR04 — Ultrasonic Distance
+- **Connected to board:** T-Display S3 #1 (master)
+- **Interface:** GPIO (trigger/echo)
 - **Pins:**
-  | Signal | Board GPIO | Wire colour |
-  |---|---|---|
-  | VCC | 3V3 | Red |
-  | GND | GND | Black |
-  | _(signal)_ | GP_ | _(colour)_ |
-- **Operating voltage:** 3.3 V / 5 V
-- **I2C address (if applicable):** `0x__`
-- **Notes / datasheet:** _(link or filename)_
+  | Signal | Board GPIO |
+  |---|---|
+  | TRIG | 2 |
+  | ECHO | 3 |
 
-### Sensor 2 — _(Name / Model)_
-_(copy the block above and fill in)_
+### MPU-6050 — IMU (Accelerometer + Gyroscope)
+- **Connected to board:** T-Display S3 #1 (master)
+- **Interface:** I2C
+- **Pins:**
+  | Signal | Board GPIO |
+  |---|---|
+  | SDA | 17 |
+  | SCL | 18 |
+- **I2C address:** `0x68`
 
 ---
 
-## Actuators
+## Actuators — T-Display S3 #2 (Slave Board)
 
-### Motor 1 — _(Name / Description)_
-- **Type:** _(e.g. DC gear motor, stepper, brushless)_
-- **Connected to:** MOTION 2350 Pro — Channel 1
-- **Direction pin:** GP0
-- **PWM pin:** GP1
-- **Encoder A:** GP22 _(if fitted)_
-- **Encoder B:** GP23 _(if fitted)_
-- **Rated voltage:** __ V
-- **Max current:** __ A
-- **Gear ratio:** __ : 1
-- **Notes:** _(e.g. left drive wheel)_
+> PWM uses ESP32-S3 LEDC peripheral — use `ledcSetup` / `ledcAttachPin` / `ledcWrite`.
+> Do NOT use `analogWrite` on this board.
 
-### Motor 2 — _(Name / Description)_
-_(copy the block above and fill in)_
+### Left Wheel Motor — MD1 Secondary (U4), A1/2 side
+- **In1:** GPIO 43 (TTGO pin 3)
+- **In2:** GPIO 44 (TTGO pin 4)
+- **EN (PWM):** GPIO 10 (TTGO pin 20) — LEDC channel 0
+- **Forward direction:** In1=LOW, In2=HIGH (dir = -1 in code)
+- **Reverse direction:** In1=HIGH, In2=LOW (dir = 1 in code)
 
-### Servo 1 — _(Name / Description)_
-- **Connected to:** MOTION 2350 Pro — Servo output 1 (GP10)
-- **Range:** 0–180°
-- **Centre position:** 90°
-- **Notes:** _(e.g. pan axis of camera mount)_
+### Right Wheel Motor — MD2 Primary (U3), A1/2 side
+- **In1:** GPIO 7 (TTGO pin 8)
+- **In2:** GPIO 8 (TTGO pin 7)
+- **EN (PWM):** GPIO 3 (TTGO pin 21) — LEDC channel 2
+- **Forward direction:** In1=LOW, In2=HIGH (dir = -1 in code)
+- **Reverse direction:** In1=LOW, In2=HIGH (dir = -1 in code — same as forward; right motor wired inverse to left)
+
+### Linear Actuator — MD1 Secondary (U4), B1/2 side
+- **In1:** GPIO 1 (TTGO pin 23)
+- **In2:** GPIO 2 (TTGO pin 22)
+- **EN:** GPIO 11 (TTGO pin 19) — must be driven HIGH to enable, LOW to disable
+- **Extend (up):** In1=HIGH, In2=LOW, En=HIGH
+- **Retract (down):** In1=LOW, In2=HIGH, En=HIGH
+- **Stop:** In1=LOW, In2=LOW, En=LOW
+
+---
+
+## Master Board Pins — T-Display S3 #1
+
+| Function | GPIO | Notes |
+|---|---|---|
+| TFT backlight | 15 | Set HIGH in setup |
+| Ultrasonic A TRIG | 2 | Front-facing HC-SR04 |
+| Ultrasonic A ECHO | 3 | Front-facing HC-SR04 |
+| Ultrasonic B TRIG | 43 | Second HC-SR04 |
+| Ultrasonic B ECHO | 44 | Second HC-SR04 |
+| MPU-6050 SDA | 16 | |
+| MPU-6050 SCL | 21 | |
+| Button | 10 | INPUT_PULLUP, active LOW |
+| STATE_OUT_PIN (to MOTION board) | 1 | GPIO pulse out |
+| SLAVE_TX (to slave T-Display RX) | 17 | GPIO pulse out |
+| SLAVE_RX (from slave T-Display TX) | 18 | Future use |
+| Encoder motor IN1 | 11 | Arm extend |
+| Encoder motor IN2 | 12 | Arm extend |
+| Encoder motor EN | 13 | LEDC channel 4 |
 
 ---
 
 ## Power Distribution
 | Rail | Source | Connected to | Notes |
 |---|---|---|---|
-| VIN (__ V) | Battery / PSU | MOTION 2350 Pro VIN | Motor supply |
-| 5 V | MOTION 2350 onboard reg | _(peripherals)_ | Max __ A |
+| VIN | Battery / PSU | MOTION 2350 Pro VIN | Motor supply |
 | 3.3 V | Each board onboard reg | GPIO logic, sensors | Max 300 mA per board |
 | USB 5 V | USB-C | T-Display S3 #1, #2 | Development / programming only |
 
 ---
 
-## Wiring Diagram
-_(Insert a diagram image here, or link to a KiCad / Fritzing file in the repo)_
-
----
-
 ## Change Log
-| Date | Change | Author |
-|---|---|---|
-| _(date)_ | Initial wiring documented | _(you)_ |
+| Date | Change |
+|---|---|
+| 2026-05-19 | Filled in confirmed working slave board pins from testing_movement_v1 |
+| 2026-05-19 | Added master board pin table, sensors, inter-board comms |
