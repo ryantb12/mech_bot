@@ -190,9 +190,10 @@ void enterState(Level s) {
       break;
 
     case EXTEND:
-      extender.writeMicroseconds(EXT_EXTEND);
-      flipperR.writeMicroseconds(NEUTRAL);
-      flipperL.writeMicroseconds(NEUTRAL);
+      // GP0=1800, GP1=1200 — confirmed working from servo test
+      extender.writeMicroseconds(EXT_EXTEND);   // GP0 → 1800
+      flipperR.writeMicroseconds(EXT_RETRACT);  // GP1 → 1200 (opposite, both drive extension)
+      flipperL.writeMicroseconds(NEUTRAL);      // GP3 → stop
       setLED(80, 0, 120);           // purple
       break;
 
