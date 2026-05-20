@@ -68,8 +68,12 @@
 #define PWM_RESOLUTION       8
 
 // ===================================================
-// COLOUR
+// COLOUR — TFT_eSPI defines TFT_LIGHTGREY as 0xD69A.
+// Override to match the working grey used in this project.
 // ===================================================
+#ifdef TFT_LIGHTGREY
+  #undef TFT_LIGHTGREY
+#endif
 #define TFT_LIGHTGREY 0xC618
 
 // ===================================================

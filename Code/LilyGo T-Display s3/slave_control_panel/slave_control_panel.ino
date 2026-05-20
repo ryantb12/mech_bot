@@ -3,72 +3,76 @@
 // Flash to slave T-Display S3 for debug/tuning.
 // Creates WiFi AP "Robot-Slave" / password "robot1234"
 // Connect phone, open browser → 192.168.4.1
-//
-// Features:
-//   • Left / right motor speed sliders (0–1023)
-//   • Drive direction buttons (fwd/back/turn/stop)
-//   • Linear actuator UP / DOWN / STOP
-//   • Individual L/R motor overrides
-//   • STOP ALL emergency button
+// Screen stays blank — status shown in phone browser.
 // ===================================================
 
-#include <TFT_eSPI.h>
-#include <SPI.h>
 #include <WiFi.h>
 #include <WebServer.h>
 
-// ── WiFi ────────────────────────────────────────────
+// ── WiFi ─────────────────────────────────────────────
 const char* SSID = "Robot-Slave";
 const char* PASS = "robot1234";
 WebServer server(80);
 
-// ── Motor pins (confirmed from testing_movement_v1) ─
+// ── Pins — matches slave_controller_v2 exactly ───────
 #define LM_In1  43
 #define LM_In2  44
 #define LM_En   10   // LEDC ch0
-#define RM_In1   7
-#define RM_In2   8
+#define RM_In1  16   // TTGO pin 8
+#define RM_In2  21   // TTGO pin 7
 #define RM_En    3   // LEDC ch2
 #define LA_In1   1
 #define LA_In2   2
 #define LA_En   11
 
+// ── PWM — matches slave_controller_v2 ────────────────
 #define PWM_FREQ       1000
 #define PWM_RESOLUTION   10   // 10-bit: 0–1023
 
-#define TFT_LIGHTGREY 0xC618
-TFT_eSPI tft = TFT_eSPI();
+// ── Speeds ───────────────────────────────────────────
+#define DEFAULT_SPEED  700
 
-// ── Motor state (for status endpoint) ───────────────
-String lastCmd = "stop_all";
-int    lastSpeed = 500;
+// Per-motor correction factors — adjustable from phone sliders
+float lmCorrection = 1.00f;   // left motor  (default 100%)
+float rmCorrection = 0.75f;   // right motor (default 75%)
 
-// ── Motor control ────────────────────────────────────
-struct Motor { int in1,in2,en,ch; };
-Motor left  = {LM_In1,LM_In2,LM_En,0};
-Motor right = {RM_In1,RM_In2,RM_En,2};
+// ── Motor structs ────────────────────────────────────
+struct Motor { int in1, in2, en, ch; };
+Motor left  = { LM_In1, LM_In2, LM_En, 0 };
+Motor right = { RM_In1, RM_In2, RM_En, 2 };
 
-void motorSetup(Motor m){
-  pinMode(m.in1,OUTPUT); pinMode(m.in2,OUTPUT);
-  ledcSetup(m.ch,PWM_FREQ,PWM_RESOLUTION);
-  ledcAttachPin(m.en,m.ch); ledcWrite(m.ch,0);
+void motorSetup(Motor m) {
+  pinMode(m.in1, OUTPUT);
+  pinMode(m.in2, OUTPUT);
+  ledcSetup(m.ch, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(m.en, m.ch);
+  ledcWrite(m.ch, 0);
 }
 
-// dir: 1=fwd, -1=rev, 0=stop
-void setMotor(Motor m, int dir, int spd){
-  if(dir==1){  digitalWrite(m.in1,HIGH); digitalWrite(m.in2,LOW);  }
-  else if(dir==-1){ digitalWrite(m.in1,LOW); digitalWrite(m.in2,HIGH); }
-  else{ digitalWrite(m.in1,LOW); digitalWrite(m.in2,LOW); spd=0; }
-  ledcWrite(m.ch,spd);
+// direction: 1=fwd, -1=rev, 0=stop
+void setMotor(Motor m, int dir, int spd) {
+  if (dir == 1)       { digitalWrite(m.in1, HIGH); digitalWrite(m.in2, LOW);  }
+  else if (dir == -1) { digitalWrite(m.in1, LOW);  digitalWrite(m.in2, HIGH); }
+  else                { digitalWrite(m.in1, LOW);  digitalWrite(m.in2, LOW);  spd = 0; }
+  ledcWrite(m.ch, spd);
 }
 
-void stopMotors(){ setMotor(left,0,0); setMotor(right,0,0); }
+void stopMotors() { setMotor(left, 0, 0); setMotor(right, 0, 0); }
 
-void setActuator(int dir){
-  if(dir==1){  digitalWrite(LA_In1,HIGH); digitalWrite(LA_In2,LOW);  digitalWrite(LA_En,HIGH); }
-  else if(dir==-1){ digitalWrite(LA_In1,LOW); digitalWrite(LA_In2,HIGH); digitalWrite(LA_En,HIGH); }
-  else{ digitalWrite(LA_In1,LOW); digitalWrite(LA_In2,LOW); digitalWrite(LA_En,LOW); }
+// Right motor physically inverted — direction signals always opposite to left
+// rmCorrection reduces right speed to compensate mechanical slip
+void driveForward(int s)  { setMotor(left, -1, (int)(s*lmCorrection)); setMotor(right,  1, (int)(s*rmCorrection)); }
+void driveBackward(int s) { setMotor(left,  1, (int)(s*lmCorrection)); setMotor(right, -1, (int)(s*rmCorrection)); }
+void turnLeft(int s)  { setMotor(left,  1, (int)(s*lmCorrection*0.5)); setMotor(right,  1, (int)(s*rmCorrection)); }
+void turnRight(int s) { setMotor(left, -1, (int)(s*lmCorrection));     setMotor(right, -1, (int)(s*rmCorrection*0.5)); }
+
+void setActuator(int dir) {
+  if (dir == 1)       { digitalWrite(LA_In1, HIGH); digitalWrite(LA_In2, LOW);  digitalWrite(LA_En, HIGH); }
+  else if (dir == -1) { digitalWrite(LA_In1, LOW);  digitalWrite(LA_In2, HIGH); digitalWrite(LA_En, HIGH); }
+  else                { digitalWrite(LA_In1, LOW);  digitalWrite(LA_In2, LOW);  digitalWrite(LA_En, LOW);  }
 }
+
+void stopAll() { stopMotors(); setActuator(0); }
 
 // ── Web page ─────────────────────────────────────────
 const char HTML[] PROGMEM = R"rawliteral(
@@ -92,7 +96,6 @@ const char HTML[] PROGMEM = R"rawliteral(
   .red{background:#d63031;color:#fff;width:100%;padding:18px;font-size:1.15em}
   label{font-size:.85em;color:#aaa;display:block;margin-bottom:4px}
   input[type=range]{width:100%;height:32px;accent-color:#00d4ff;margin-bottom:6px}
-  .spd-val{text-align:center;font-size:1.3em;color:#fdcb6e;font-weight:bold;margin-bottom:8px}
   .status-bar{background:#0a0a1a;border-radius:8px;padding:8px;text-align:center;font-size:.85em;color:#00d4ff;margin-top:6px}
 </style>
 </head><body>
@@ -100,9 +103,21 @@ const char HTML[] PROGMEM = R"rawliteral(
 
 <div class='card'>
   <h2>Speed</h2>
-  <label>Drive speed: <span id='spd_lbl'>500</span> / 1023</label>
-  <input type='range' min='0' max='1023' value='500' id='spd'
+  <label>Drive speed: <span id='spd_lbl'>700</span> / 1023</label>
+  <input type='range' min='0' max='1023' value='700' id='spd'
     oninput="document.getElementById('spd_lbl').innerText=this.value">
+</div>
+
+<div class='card'>
+  <h2>Motor Speed Correction</h2>
+  <label>Left: <span id='lm_lbl'>1.00</span> &nbsp;(<span id='lm_pct'>100</span>%)</label>
+  <input type='range' min='50' max='100' value='100' id='lm'
+    oninput='updateLm(this.value)'
+    onchange='setLm(this.value)'>
+  <label style='margin-top:8px'>Right: <span id='cor_lbl'>0.75</span> &nbsp;(<span id='cor_pct'>75</span>%)</label>
+  <input type='range' min='50' max='100' value='75' id='cor'
+    oninput='updateCor(this.value)'
+    onchange='setCor(this.value)'>
 </div>
 
 <div class='card'>
@@ -148,77 +163,101 @@ const char HTML[] PROGMEM = R"rawliteral(
 
 <script>
 function cmd(action){
-  const spd = document.getElementById('spd').value;
-  fetch('/cmd?a='+action+'&s='+spd)
+  const s = document.getElementById('spd').value;
+  fetch('/cmd?a='+action+'&s='+s)
     .then(r=>r.text())
-    .then(t=>{
-      document.getElementById('status').innerText=t;
-    }).catch(()=>{});
+    .then(t=>{ document.getElementById('status').innerText=t; })
+    .catch(()=>{});
+}
+function updateLm(pct){
+  document.getElementById('lm_lbl').innerText=(pct/100).toFixed(2);
+  document.getElementById('lm_pct').innerText=pct;
+}
+function setLm(pct){
+  updateLm(pct);
+  fetch('/correction?m=l&v='+(pct/100))
+    .then(r=>r.text())
+    .then(t=>{ document.getElementById('status').innerText=t; })
+    .catch(()=>{});
+}
+function updateCor(pct){
+  document.getElementById('cor_lbl').innerText=(pct/100).toFixed(2);
+  document.getElementById('cor_pct').innerText=pct;
+}
+function setCor(pct){
+  updateCor(pct);
+  fetch('/correction?m=r&v='+(pct/100))
+    .then(r=>r.text())
+    .then(t=>{ document.getElementById('status').innerText=t; })
+    .catch(()=>{});
 }
 </script>
 </body></html>
 )rawliteral";
 
-// ── Server handlers ───────────────────────────────────
-void handleRoot() { server.send(200,"text/html",HTML); }
+// ── Handlers ─────────────────────────────────────────
+void handleRoot() { server.send(200, "text/html", HTML); }
+
+void handleCorrection() {
+  String m = server.arg("m");   // "l" or "r"
+  float  v = constrain(server.arg("v").toFloat(), 0.5f, 1.0f);
+  if (m == "l") {
+    lmCorrection = v;
+    Serial.print("LM correction: "); Serial.println(lmCorrection);
+    server.send(200, "text/plain", "L motor = " + String(lmCorrection, 2));
+  } else {
+    rmCorrection = v;
+    Serial.print("RM correction: "); Serial.println(rmCorrection);
+    server.send(200, "text/plain", "R motor = " + String(rmCorrection, 2));
+  }
+}
 
 void handleCmd() {
   String a = server.arg("a");
-  int s    = server.arg("s").toInt();
-  lastCmd  = a; lastSpeed = s;
+  int    s = server.arg("s").toInt();
 
-  if(a=="fwd")      { setMotor(left,-1,s); setMotor(right,-1,s); }
-  else if(a=="back"){ setMotor(left, 1,s); setMotor(right,-1,s); }
-  else if(a=="stop"){ stopMotors(); }
-  else if(a=="turn_l"){ setMotor(left, 1,s); setMotor(right,-1,s); }
-  else if(a=="turn_r"){ setMotor(left,-1,s); setMotor(right, 1,s); }
-  else if(a=="l_fwd") { setMotor(left,-1,s); }
-  else if(a=="l_back"){ setMotor(left, 1,s); }
-  else if(a=="l_stop"){ setMotor(left, 0,0); }
-  else if(a=="r_fwd") { setMotor(right,-1,s); }
-  else if(a=="r_back"){ setMotor(right, 1,s); }
-  else if(a=="r_stop"){ setMotor(right, 0,0); }
-  else if(a=="act_up")  { setActuator( 1); }
-  else if(a=="act_down"){ setActuator(-1); }
-  else if(a=="act_stop"){ setActuator( 0); }
-  else if(a=="stop_all"){ stopMotors(); setActuator(0); }
+  if      (a == "fwd")      driveForward(s);
+  else if (a == "back")     driveBackward(s);
+  else if (a == "stop")     stopMotors();
+  else if (a == "turn_l")   turnLeft(s);
+  else if (a == "turn_r")   turnRight(s);
+  else if (a == "l_fwd")  { setMotor(left,  -1, s); }
+  else if (a == "l_back") { setMotor(left,   1, s); }
+  else if (a == "l_stop") { setMotor(left,   0, 0); }
+  else if (a == "r_fwd")  { setMotor(right,  1, s); }  // +1 = fwd (inverted motor)
+  else if (a == "r_back") { setMotor(right, -1, s); }  // -1 = back (inverted motor)
+  else if (a == "r_stop") { setMotor(right,  0, 0); }
+  else if (a == "act_up")   setActuator( 1);
+  else if (a == "act_down") setActuator(-1);
+  else if (a == "act_stop") setActuator( 0);
+  else if (a == "stop_all") stopAll();
 
-  server.send(200,"text/plain",a+" @ spd="+String(s));
-
-  // Update TFT
-  tft.fillRect(0,88,tft.width(),50,0xC618);
-  tft.setTextColor(TFT_BLACK,0xC618);
-  tft.setTextDatum(MC_DATUM); tft.setTextSize(2);
-  tft.drawString(a,tft.width()/2,108);
-  tft.setTextSize(1);
-  tft.drawString("spd:"+String(s),tft.width()/2,130);
+  server.send(200, "text/plain", a + " @ " + String(s));
 }
 
 // ── Setup ─────────────────────────────────────────────
 void setup() {
-  pinMode(15,OUTPUT); digitalWrite(15,HIGH);
   Serial.begin(115200);
 
-  motorSetup(left); motorSetup(right);
-  pinMode(LA_In1,OUTPUT); pinMode(LA_In2,OUTPUT); pinMode(LA_En,OUTPUT);
-  stopMotors(); setActuator(0);
+  motorSetup(left);
+  motorSetup(right);
+  pinMode(LA_In1, OUTPUT); pinMode(LA_In2, OUTPUT); pinMode(LA_En, OUTPUT);
+  stopAll();
 
-  WiFi.softAP(SSID,PASS);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(SSID, PASS);
+  delay(100);
   IPAddress ip = WiFi.softAPIP();
 
-  server.on("/",    handleRoot);
-  server.on("/cmd", handleCmd);
+  server.on("/",           handleRoot);
+  server.on("/cmd",        handleCmd);
+  server.on("/correction", handleCorrection);
   server.begin();
 
-  tft.init(); tft.setRotation(1); tft.fillScreen(0xC618);
-  tft.setTextColor(TFT_BLACK,0xC618); tft.setTextDatum(MC_DATUM);
-  tft.setTextSize(2); tft.drawString("SLAVE PANEL",tft.width()/2,30);
-  tft.setTextSize(1); tft.drawString("WiFi: "+String(SSID),tft.width()/2,60);
-  tft.drawString("Pass: "+String(PASS),tft.width()/2,78);
-  tft.drawString(ip.toString(),tft.width()/2,100);
-  tft.drawString("All motors stopped",tft.width()/2,130);
-
-  Serial.print("AP: "); Serial.println(ip);
+  Serial.println("=== SLAVE PANEL READY ===");
+  Serial.print("WiFi: "); Serial.println(SSID);
+  Serial.print("Pass: "); Serial.println(PASS);
+  Serial.print("IP:   "); Serial.println(ip);
 }
 
 void loop() { server.handleClient(); }

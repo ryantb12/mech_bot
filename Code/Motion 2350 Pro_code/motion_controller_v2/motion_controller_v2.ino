@@ -154,6 +154,11 @@ enum Level {
 Level currentState = WAITING;
 bool  lastPinState = LOW;
 
+// Current servo positions — tracked for panel UART commands
+int usExt   = 1500;
+int usFlipR = 1500;
+int usFlipL = 1500;
+
 void enterState(Level s);  // forward declaration — fixes Arduino enum scope error
 
 // ===================================================
@@ -261,6 +266,31 @@ void updateMusic() {
 }
 
 // ===================================================
+// SERVO COMMAND EXECUTION
+// Called with burst count from pulse decoder below.
+// 2=extend  3=ext stop  4=retract
+// 5=flip raise  6=flip stop  7=flip dump  8=all neutral
+// ===================================================
+void executeServoCmd(int n) {
+  Serial.print("SERVO CMD: "); Serial.println(n);
+  switch(n) {
+    case 2: usExt=EXT_EXTEND;   extender.writeMicroseconds(usExt);  break;
+    case 3: usExt=NEUTRAL;      extender.writeMicroseconds(usExt);  break;
+    case 4: usExt=EXT_RETRACT;  extender.writeMicroseconds(usExt);  break;
+    case 5: usFlipR=FLIP_R_RAISE; usFlipL=FLIP_L_RAISE;
+            flipperR.writeMicroseconds(usFlipR);
+            flipperL.writeMicroseconds(usFlipL); break;
+    case 6: usFlipR=NEUTRAL; usFlipL=NEUTRAL;
+            flipperR.writeMicroseconds(NEUTRAL);
+            flipperL.writeMicroseconds(NEUTRAL); break;
+    case 7: usFlipR=FLIP_R_DUMP; usFlipL=FLIP_L_DUMP;
+            flipperR.writeMicroseconds(usFlipR);
+            flipperL.writeMicroseconds(usFlipL); break;
+    case 8: allNeutral(); break;
+  }
+}
+
+// ===================================================
 // SETUP
 // ===================================================
 void setup() {
@@ -293,19 +323,43 @@ void setup() {
 // LOOP
 // ===================================================
 void loop() {
-  // ---- Pulse detection (rising edge) ----
+  // ---- Pulse detection (duration-based) ----
+  // Long pulse ≥60ms  → state advance
+  // Short pulse <60ms → servo command (count bursts)
+  static unsigned long risingTime   = 0;
+  static int           burstCount   = 0;
+  static unsigned long lastShortPulse = 0;
+
   bool pinNow = digitalRead(STATE_PIN);
+
   if (pinNow == HIGH && lastPinState == LOW) {
-    delay(20);  // debounce
-    if (currentState < DONE) {
-      currentState = (Level)(currentState + 1);
-      enterState(currentState);
-      // Reset music to note 0 on state change for a fresh feel
-      currentNote = 0;
-      noteStart   = millis();
-      tone(BUZZER_PIN, melody[0].freq, melody[0].dur);
+    risingTime = millis();  // record rising edge
+  }
+
+  if (pinNow == LOW && lastPinState == HIGH) {
+    unsigned long dur = millis() - risingTime;
+    if (dur >= 60) {
+      // Long pulse — state advance
+      if (currentState < DONE) {
+        currentState = (Level)(currentState + 1);
+        enterState(currentState);
+        currentNote = 0; noteStart = millis();
+        tone(BUZZER_PIN, melody[0].freq, melody[0].dur);
+      }
+      burstCount = 0;
+    } else if (dur >= 10) {
+      // Short pulse — part of servo command burst
+      burstCount++;
+      lastShortPulse = millis();
     }
   }
+
+  // Process burst after 400ms of silence
+  if (burstCount > 0 && (millis() - lastShortPulse) > 400) {
+    executeServoCmd(burstCount);
+    burstCount = 0;
+  }
+
   lastPinState = pinNow;
 
   // ---- Keep music playing ----

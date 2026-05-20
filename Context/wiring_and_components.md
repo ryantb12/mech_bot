@@ -9,8 +9,9 @@
 ## Inter-Board Communication
 | From | To | Interface | Pins (From side) | Pins (To side) | Notes |
 |---|---|---|---|---|---|
-| T-Display S3 #1 (master) | T-Display S3 #2 (slave) | GPIO pulse | GPIO 10 (SLAVE_PIN) | GPIO 16 (COMMS_PIN, INPUT_PULLDOWN) | Rising-edge pulse advances state |
-| T-Display S3 #1 (master) | MOTION 2350 Pro | GPIO pulse | GPIO 1 (STATE_OUT_PIN) | GP26 (INPUT_PULLDOWN) | Rising-edge pulse advances state |
+| T-Display S3 #1 (master) | T-Display S3 #2 (slave) | GPIO pulse | GPIO 17 (SLAVE_TX) | GPIO 16 (COMMS_PIN, INPUT_PULLDOWN) | Rising-edge pulse advances state |
+| T-Display S3 #1 (master) | MOTION 2350 Pro | GPIO pulse | GPIO 1 (STATE_OUT_PIN) | GP26 (INPUT_PULLDOWN) | Rising-edge pulse advances state — confirmed wiring |
+| T-Display S3 #1 (master) | MOTION 2350 Pro | UART TX | GPIO 14 (MOTION_UART_TX) | GP8 (Serial1 RX) | Panel servo commands: EXT:xxxx / FLIP:xxxx / NEUTRAL |
 
 ---
 

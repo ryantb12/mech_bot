@@ -4,7 +4,7 @@
 // Receives rising-edge pulses from master on COMMS_PIN.
 // Each pulse advances one state, matching master_controller_v2.
 //
-// WIRING: master GPIO 10 (SLAVE_PIN) --> slave GPIO 16 (COMMS_PIN)
+// WIRING: master GPIO 17 (SLAVE_TX) --> slave GPIO 18 (COMMS_PIN)
 //
 // State | Master state | Slave action
 // ------+--------------+------------------------------
@@ -26,47 +26,51 @@
 #include <SPI.h>
 
 // ===================================================
-// PIN DEFINITIONS (confirmed working from testing_movement_v1)
+// PIN DEFINITIONS — from schematic SCHLIB_TTGO-T-Display
 // ===================================================
-// Comms in — wire from master GPIO 10
-#define COMMS_PIN  16
+// Comms in — master GPIO 17 → slave GPIO 18 (TTGO pin 5)
+#define COMMS_PIN  18
 
 // Left wheel motor — MD1 Secondary (U4), A1/2 side
-#define LM_In1  43
-#define LM_In2  44
-#define LM_En   10   // LEDC channel 0
+#define LM_In1  43   // TTGO pin 3
+#define LM_In2  44   // TTGO pin 4
+#define LM_En   10   // TTGO pin 20 — LEDC channel 0
 
-// Right wheel motor — MD2 Primary (U3), A1/2 side
-#define RM_In1   7
-#define RM_In2   8
-#define RM_En    3   // LEDC channel 2
+// Right wheel motor — MD2 Primary (U3)
+#define RM_In1  16   // TTGO pin 8  (was wrongly set to GPIO 7)
+#define RM_In2  21   // TTGO pin 7  (was wrongly set to GPIO 8)
+#define RM_En    3   // TTGO pin 21 — LEDC channel 2
 
 // Linear actuator — MD1 Secondary (U4), B1/2 side
-#define LA_In1   1
-#define LA_In2   2
-#define LA_En   11   // digital enable
+#define LA_In1   1   // TTGO pin 23
+#define LA_In2   2   // TTGO pin 22
+#define LA_En   11   // TTGO pin 19
 
 // ===================================================
-// SPEEDS (0–255)
+// SPEEDS (0–1023 for 10-bit PWM)
 // ===================================================
-#define DRIVE_SPEED   200   // forward / backward
-#define TURN_SPEED    160   // in-place turn
-#define ACT_SPEED     255   // linear actuator (digital, speed unused)
+#define DRIVE_SPEED      700
+#define TURN_SPEED       500
+#define ACT_SPEED       1023
+
+// Right motor correction — mechanical slip compensation
+// Reduces right motor speed by 25% to drive straight
+#define RM_CORRECTION  0.75f
 
 // ===================================================
 // PWM
 // ===================================================
 #define PWM_FREQ       1000
-#define PWM_RESOLUTION    10
+#define PWM_RESOLUTION   10   // 10-bit: 0–1023
 
 // ===================================================
 // COLOUR
 // ===================================================
+#ifdef TFT_LIGHTGREY
+  #undef TFT_LIGHTGREY
+#endif
 #define TFT_LIGHTGREY 0xC618
 
-// ===================================================
-// DISPLAY
-// ===================================================
 TFT_eSPI tft = TFT_eSPI();
 
 // ===================================================
@@ -93,17 +97,12 @@ bool  lastPinState = LOW;
 // ===================================================
 // MOTOR STRUCTS
 // ===================================================
-struct Motor {
-  int in1, in2, en, ch;
-};
+struct Motor { int in1, in2, en, ch; };
+struct LinearAct { int in1, in2, en; };
 
-struct LinearAct {
-  int in1, in2, en;
-};
-
-Motor     leftMotor  = { LM_In1, LM_In2, LM_En,  0 };
-Motor     rightMotor = { RM_In1, RM_In2, RM_En,  2 };
-LinearAct actuator   = { LA_In1, LA_In2, LA_En     };
+Motor     leftMotor  = { LM_In1, LM_In2, LM_En, 0 };
+Motor     rightMotor = { RM_In1, RM_In2, RM_En, 2 };
+LinearAct actuator   = { LA_In1, LA_In2, LA_En    };
 
 // ===================================================
 // MOTOR FUNCTIONS
@@ -116,169 +115,64 @@ void motorSetup(Motor m) {
   ledcWrite(m.ch, 0);
 }
 
-// direction: 1=forward, -1=reverse, 0=stop
+// direction: 1=fwd, -1=rev, 0=stop
 void setMotor(Motor m, int dir, int spd) {
-  if (dir == 1) {
-    digitalWrite(m.in1, HIGH);
-    digitalWrite(m.in2, LOW);
-  } else if (dir == -1) {
-    digitalWrite(m.in1, LOW);
-    digitalWrite(m.in2, HIGH);
-  } else {
-    digitalWrite(m.in1, LOW);
-    digitalWrite(m.in2, LOW);
-    spd = 0;
-  }
+  if (dir == 1)       { digitalWrite(m.in1, HIGH); digitalWrite(m.in2, LOW);  }
+  else if (dir == -1) { digitalWrite(m.in1, LOW);  digitalWrite(m.in2, HIGH); }
+  else                { digitalWrite(m.in1, LOW);  digitalWrite(m.in2, LOW); spd = 0; }
   ledcWrite(m.ch, spd);
 }
 
-// direction: 1=raise(extend), -1=lower(retract), 0=stop
+// direction: 1=raise, -1=lower, 0=stop
 void setActuator(LinearAct l, int dir) {
-  if (dir == 1) {
-    digitalWrite(l.in1, HIGH);
-    digitalWrite(l.in2, LOW);
-    digitalWrite(l.en,  HIGH);
-  } else if (dir == -1) {
-    digitalWrite(l.in1, LOW);
-    digitalWrite(l.in2, HIGH);
-    digitalWrite(l.en,  HIGH);
-  } else {
-    digitalWrite(l.in1, LOW);
-    digitalWrite(l.in2, LOW);
-    digitalWrite(l.en,  LOW);
-  }
+  if (dir == 1)       { digitalWrite(l.in1, HIGH); digitalWrite(l.in2, LOW);  digitalWrite(l.en, HIGH); }
+  else if (dir == -1) { digitalWrite(l.in1, LOW);  digitalWrite(l.in2, HIGH); digitalWrite(l.en, HIGH); }
+  else                { digitalWrite(l.in1, LOW);  digitalWrite(l.in2, LOW);  digitalWrite(l.en, LOW);  }
 }
 
-void stopMotors() {
-  setMotor(leftMotor,  0, 0);
-  setMotor(rightMotor, 0, 0);
-}
+void stopMotors()   { setMotor(leftMotor, 0, 0); setMotor(rightMotor, 0, 0); }
+void stopActuator() { setActuator(actuator, 0); }
+void stopAll()      { stopMotors(); stopActuator(); }
 
-void stopActuator() {
-  setActuator(actuator, 0);
-}
-
-void stopAll() {
-  stopMotors();
-  stopActuator();
-}
-
-// Drive helpers — directions confirmed from testing_movement_v1
-void driveForward(int spd) {
-  setMotor(leftMotor,  -1, spd);
-  setMotor(rightMotor, -1, spd);
-}
-
-void driveBackward(int spd) {
-  setMotor(leftMotor,   1, spd);
-  setMotor(rightMotor, -1, spd);
-}
-
-// Turn in place — left wheel back, right wheel forward.
-// If robot turns the wrong way, swap the directions below.
-void driveTurn(int spd) {
-  setMotor(leftMotor,   1, spd);   // left backward
-  setMotor(rightMotor, -1, spd);   // right forward
-}
+// Right motor physically inverted — direction signals are always opposite to left
+// RM_CORRECTION reduces right motor speed to compensate mechanical slip
+void driveForward(int spd)  { setMotor(leftMotor, -1, spd); setMotor(rightMotor,  1, (int)(spd * RM_CORRECTION)); }
+void driveBackward(int spd) { setMotor(leftMotor,  1, spd); setMotor(rightMotor, -1, (int)(spd * RM_CORRECTION)); }
+void driveTurn(int spd)     { setMotor(leftMotor,  1, (int)(spd * 0.5)); setMotor(rightMotor,  1, (int)(spd * RM_CORRECTION)); } // L back half-speed, R fwd
 
 // ===================================================
 // DISPLAY
 // ===================================================
-void showState(String label, String detail, uint32_t colour) {
+void showState(String label, uint32_t colour) {
   tft.fillRect(0, 0, tft.width(), 25, colour);
   tft.setTextColor(TFT_WHITE, colour);
   tft.setTextDatum(MC_DATUM);
   tft.setTextSize(1);
-  tft.drawString("SLAVE  |  STATE: " + String(currentState), tft.width() / 2, 12);
-
-  tft.fillRect(0, 25, tft.width(), 60, TFT_LIGHTGREY);
+  tft.drawString("SLAVE  STATE: " + String((int)currentState), tft.width() / 2, 12);
+  tft.fillRect(0, 25, tft.width(), 145, TFT_LIGHTGREY);
   tft.setTextColor(colour, TFT_LIGHTGREY);
   tft.setTextSize(4);
-  tft.drawString(label, tft.width() / 2, 55);
-
-  tft.drawLine(0, 85, tft.width(), 85, TFT_BLACK);
-
-  tft.fillRect(0, 88, tft.width(), 80, TFT_LIGHTGREY);
-  tft.setTextColor(TFT_BLACK, TFT_LIGHTGREY);
-  tft.setTextSize(1);
-  tft.drawString(detail, tft.width() / 2, 115);
+  tft.drawString(label, tft.width() / 2, 95);
 }
 
 // ===================================================
-// STATE ENTRY — called once on each state change
+// STATE ENTRY
 // ===================================================
 void enterState(Level s) {
-  Serial.print("STATE -> ");
-  Serial.println(s);
-
+  Serial.print("STATE -> "); Serial.println((int)s);
   switch (s) {
-
-    case WAITING:
-      stopAll();
-      showState("WAIT", "Waiting for master", TFT_DARKGREY);
-      break;
-
-    case CALIBRATION:
-      stopAll();
-      showState("CAL", "Master calibrating...", TFT_DARKCYAN);
-      break;
-
-    case FORWARD1:
-      stopActuator();
-      driveForward(DRIVE_SPEED);
-      showState("FWD1", "Driving forward (pass 1)", TFT_NAVY);
-      break;
-
-    case BACKWARD:
-      stopActuator();
-      driveBackward(DRIVE_SPEED);
-      showState("BACK", "Driving backward", TFT_NAVY);
-      break;
-
-    case FORWARD2:
-      stopActuator();
-      driveForward(DRIVE_SPEED);
-      showState("FWD2", "Driving forward (pass 2)", TFT_NAVY);
-      break;
-
-    case EXTEND:
-      stopAll();
-      showState("EXTND", "Arm extend (master)", TFT_PURPLE);
-      break;
-
-    case RAISEARM:
-      stopMotors();
-      setActuator(actuator, 1);   // raise arm
-      showState("RAISE", "Raising arm", TFT_PURPLE);
-      break;
-
-    case TURN:
-      stopActuator();
-      driveTurn(TURN_SPEED);
-      showState("TURN", "Turning in place", TFT_NAVY);
-      break;
-
-    case FORWARD3:
-      stopActuator();
-      driveForward(DRIVE_SPEED);
-      showState("FWD3", "Driving to deposit", TFT_NAVY);
-      break;
-
-    case DEPOSIT:
-      stopAll();
-      showState("DUMP", "Depositing...", TFT_ORANGE);
-      break;
-
-    case GOHOME:
-      stopActuator();
-      driveBackward(DRIVE_SPEED);
-      showState("HOME", "Returning home", TFT_DARKGREEN);
-      break;
-
-    case DONE:
-      stopAll();
-      showState("DONE", "Mission complete!", TFT_DARKGREEN);
-      break;
+    case WAITING:     showState("WAIT",  TFT_DARKGREY);  stopAll();                                  break;
+    case CALIBRATION: showState("CAL",   TFT_DARKCYAN);  stopAll();                                  break;
+    case FORWARD1:    showState("FWD1",  TFT_NAVY);      stopActuator(); driveForward(DRIVE_SPEED);  break;
+    case BACKWARD:    showState("BACK",  TFT_NAVY);      stopActuator(); driveBackward(DRIVE_SPEED); break;
+    case FORWARD2:    showState("FWD2",  TFT_NAVY);      stopActuator(); driveForward(DRIVE_SPEED);  break;
+    case EXTEND:      showState("EXTND", TFT_PURPLE);    stopAll();                                  break;
+    case RAISEARM:    showState("RAISE", TFT_PURPLE);    stopMotors(); setActuator(actuator, 1);     break;
+    case TURN:        showState("TURN",  TFT_NAVY);      stopActuator(); driveTurn(TURN_SPEED);      break;
+    case FORWARD3:    showState("FWD3",  TFT_NAVY);      stopActuator(); driveForward(DRIVE_SPEED);  break;
+    case DEPOSIT:     showState("DUMP",  TFT_ORANGE);    stopAll();                                  break;
+    case GOHOME:      showState("HOME",  TFT_DARKGREEN); stopActuator(); driveBackward(DRIVE_SPEED); break;
+    case DONE:        showState("DONE",  TFT_DARKGREEN); stopAll();                                  break;
   }
 }
 
@@ -286,8 +180,7 @@ void enterState(Level s) {
 // SETUP
 // ===================================================
 void setup() {
-  pinMode(15, OUTPUT);
-  digitalWrite(15, HIGH);  // backlight on
+  pinMode(15, OUTPUT); digitalWrite(15, HIGH);  // power enable — same as testing_movement_v1
 
   Serial.begin(115200);
 
@@ -295,19 +188,13 @@ void setup() {
 
   motorSetup(leftMotor);
   motorSetup(rightMotor);
-
-  pinMode(LA_In1, OUTPUT);
-  pinMode(LA_In2, OUTPUT);
-  pinMode(LA_En,  OUTPUT);
+  pinMode(LA_In1, OUTPUT); pinMode(LA_In2, OUTPUT); pinMode(LA_En, OUTPUT);
   stopAll();
 
-  tft.init();
-  tft.setRotation(1);
-  tft.fillScreen(TFT_LIGHTGREY);
-
+  tft.init(); tft.setRotation(1); tft.fillScreen(TFT_LIGHTGREY);
   enterState(WAITING);
 
-  Serial.println("SLAVE v2 ready — waiting for pulses on GPIO 16");
+  Serial.println("SLAVE v2 ready — pulses on GPIO 18");
 }
 
 // ===================================================
@@ -316,10 +203,8 @@ void setup() {
 void loop() {
   bool pinNow = digitalRead(COMMS_PIN);
 
-  // Detect rising edge
   if (pinNow == HIGH && lastPinState == LOW) {
-    delay(20);  // debounce
-
+    delay(20);
     if (currentState < DONE) {
       currentState = (Level)(currentState + 1);
       enterState(currentState);

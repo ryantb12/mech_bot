@@ -50,6 +50,9 @@
 // ===================================================
 // COLOUR — TFT_eSPI has no light grey built-in
 // ===================================================
+#ifdef TFT_LIGHTGREY
+  #undef TFT_LIGHTGREY
+#endif
 #define TFT_LIGHTGREY 0xC618
 
 // ===================================================

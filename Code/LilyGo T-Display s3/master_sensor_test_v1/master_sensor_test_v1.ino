@@ -24,6 +24,9 @@
 #define MPU_ADDR 0x68
 #define BUTTON_PIN 10   // INPUT_PULLUP — active LOW
 
+#ifdef TFT_LIGHTGREY
+  #undef TFT_LIGHTGREY
+#endif
 #define TFT_LIGHTGREY 0xC618
 
 // ===================================================

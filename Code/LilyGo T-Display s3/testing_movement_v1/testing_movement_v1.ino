@@ -41,6 +41,9 @@
 // ===================================================
 // COLOUR
 // ===================================================
+#ifdef TFT_LIGHTGREY
+  #undef TFT_LIGHTGREY
+#endif
 #define TFT_LIGHTGREY 0xC618
 
 TFT_eSPI tft = TFT_eSPI();
