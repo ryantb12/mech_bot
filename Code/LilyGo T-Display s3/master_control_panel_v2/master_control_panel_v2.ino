@@ -44,7 +44,7 @@ WebServer server(80);
 #define STATE_OUT     1   // → MOTION GP26
 // ESP-NOW slave MAC — from Context/mac_addresses.h and platformio.ini
 #ifndef SLAVE_MAC
-  #define SLAVE_MAC {0x30, 0x30, 0xF9, 0x59, 0xCE, 0xE4}
+  #define SLAVE_MAC {0x30, 0x30, 0xF9, 0x59, 0x31, 0x78}
 #endif
 uint8_t slaveMac[] = SLAVE_MAC;
 
@@ -183,9 +183,15 @@ long ping(int trig,int echo){
 }
 
 // ── ESP-NOW helpers ──────────────────────────────────
-void sendToSlave(uint8_t cmd) {
-  esp_now_send(slaveMac, &cmd, 1);
-  Serial.print("ESP-NOW slave: 0x"); Serial.println(cmd, HEX);
+void sendToSlave(uint8_t cmd, int speed = -1) {
+  if (speed >= 0) {
+    uint8_t data[2] = {cmd, (uint8_t)(constrain(speed,0,1023)/4)};
+    esp_now_send(slaveMac, data, 2);
+  } else {
+    esp_now_send(slaveMac, &cmd, 1);
+  }
+  Serial.print("ESP-NOW slave cmd:"); Serial.print(cmd);
+  if(speed>=0){Serial.print(" spd:"); Serial.print(speed);} Serial.println();
 }
 
 void sendStatePulse(){
@@ -196,9 +202,9 @@ void sendStatePulse(){
   logEvent("STATE_ADVANCE pulse#"+String(pulseCount));
 }
 
-void sendSlaveCmd(const String& s){
+void sendSlaveCmd(const String& s, int speed = -1){
   uint8_t cmd = (uint8_t)s.toInt();
-  if(cmd >= 2 && cmd <= 9) sendToSlave(cmd);
+  if(cmd >= 2 && cmd <= 9) sendToSlave(cmd, speed);
 }
 
 // Short burst on STATE_OUT — MOTION servo commands
@@ -298,6 +304,9 @@ const char HTML[] PROGMEM = R"rawliteral(
 <!-- SLAVE DRIVE -->
 <div class='card'>
   <h2>Slave — Drive</h2>
+  <label style='font-size:.8em;color:#aaa;margin-bottom:3px;display:block'>Speed: <span id='spd_lbl'>700</span> / 1023</label>
+  <input type='range' min='0' max='1023' value='700' id='spd_sl' style='width:100%;height:28px;accent-color:#00d4ff;margin-bottom:8px'
+    oninput="document.getElementById('spd_lbl').innerText=this.value">
   <div class='row'>
     <button class='btn g'  onclick='sl(2)'>&#9650; FWD</button>
     <button class='btn o'  onclick='sl(3)'>&#9660; BACK</button>
@@ -329,9 +338,27 @@ const char HTML[] PROGMEM = R"rawliteral(
   </div>
   <div class='row'>
     <button class='btn p'  onclick='mo(5)'>RAISE</button>
-    <button class='btn gr' onclick='mo(6)'>FLIP STOP</button>
+    <button class='btn gr' onclick='mo(6)'>FLIP MID</button>
     <button class='btn o'  onclick='mo(7)'>DUMP</button>
   </div>
+  <label style='font-size:.8em;color:#aaa;margin:6px 0 3px;display:block'>Flip increment: <span id='flip_inc_lbl'>5</span>°</label>
+  <input type='range' min='1' max='30' value='5' id='flip_inc' style='width:100%;height:28px;accent-color:#6c5ce7;margin-bottom:6px'
+    oninput="document.getElementById('flip_inc_lbl').innerText=this.value">
+  <div class='row'>
+    <button class='btn p' onclick='mo(9)'>FLIP +°</button>
+    <button class='btn o' onclick='mo(10)'>FLIP -°</button>
+  </div>
+  <div class='g2' style='margin-top:6px'>
+    <div style='background:#0a0a1a;border-radius:8px;padding:8px;text-align:center'>
+      <div style='font-size:.65em;color:#888'>GP1 (Right)</div>
+      <div style='font-size:1.1em;color:#a29bfe;font-weight:bold' id='pos_gp1'>90°</div>
+    </div>
+    <div style='background:#0a0a1a;border-radius:8px;padding:8px;text-align:center'>
+      <div style='font-size:.65em;color:#888'>GP3 (Left)</div>
+      <div style='font-size:1.1em;color:#a29bfe;font-weight:bold' id='pos_gp3'>90°</div>
+    </div>
+  </div>
+  <button class='btn teal full' onclick='mo(11)' style='margin-top:6px'>&#9654; RANGE CHECK GP5</button>
   <button class='btn red full' onclick='mo(8)' style='margin-top:4px'>ALL NEUTRAL</button>
 </div>
 
@@ -477,10 +504,24 @@ function sl(n){
   if(n===2) moveDir=1;
   else if(n===3) moveDir=-1;
   else if(n===6||n===7||n===8||n===9) moveDir=0;
-  // turns: keep moveDir 0
-  fetch('/slave?n='+n).then(r=>r.text()).then(t=>stat(t));
+  const spd = document.getElementById('spd_sl') ? document.getElementById('spd_sl').value : 700;
+  fetch('/slave?n='+n+'&s='+spd).then(r=>r.text()).then(t=>stat(t));
 }
-function mo(n){ fetch('/motion?n='+n).then(r=>r.text()).then(t=>stat(t)); }
+let flipPos = 90;  // track flipper angle locally for display
+function mo(n){
+  const inc = document.getElementById('flip_inc') ? parseInt(document.getElementById('flip_inc').value) : 5;
+  fetch('/motion?n='+n+'&inc='+inc).then(r=>r.text()).then(t=>{
+    stat(t);
+    // Update local position display
+    if(n===9){ flipPos=Math.min(180,flipPos+inc); }
+    else if(n===10){ flipPos=Math.max(0,flipPos-inc); }
+    else if(n===5){ flipPos=45; }
+    else if(n===6||n===8){ flipPos=90; }
+    else if(n===7){ flipPos=135; }
+    document.getElementById('pos_gp1').innerText=flipPos+'°';
+    document.getElementById('pos_gp3').innerText=(180-flipPos)+'°';
+  });
+}
 function stat(t){ document.getElementById('status').innerText=t; }
 
 // Override post for set_home to mark on map
@@ -569,20 +610,35 @@ void handleSensors() {
 
 void handleSlave() {
   int n = server.arg("n").toInt();
+  int s = server.arg("s").toInt();  // speed from slider (0 if not provided)
   if(n<2||n>9){ server.send(400,"text/plain","Bad"); return; }
-  sendSlaveCmd(String(n));
+  sendSlaveCmd(String(n), s > 0 ? s : -1);
   const char* lbl[]={"","","FWD","BACK","TURN_L","TURN_R","STOP","ACT_UP","ACT_DN","ACT_STOP"};
   logEvent("SLAVE "+String(lbl[n])+" ("+String(n)+"p)");
   server.send(200,"text/plain","Slave: "+String(lbl[n]));
 }
 
 void handleMotion() {
-  int n = server.arg("n").toInt();
-  if(n<2||n>8){ server.send(400,"text/plain","Bad"); return; }
-  sendMotionBurst(n);
-  const char* lbl[]={"","","EXTEND","EXT_STOP","RETRACT","FLIP_RAISE","FLIP_STOP","FLIP_DUMP","NEUTRAL"};
-  logEvent("MOTION "+String(lbl[n])+" ("+String(n)+"p)");
-  server.send(200,"text/plain","Motion: "+String(lbl[n]));
+  int n   = server.arg("n").toInt();
+  int inc = max(1, server.arg("inc").toInt());
+  if(n<2||n>11){ server.send(400,"text/plain","Bad"); return; }
+
+  if((n==9||n==10) && inc>5) {
+    // Fire multiple +5° bursts for increments larger than 5°
+    int steps = max(1, (int)round((float)inc/5.0f));
+    for(int i=0;i<steps;i++){
+      sendMotionBurst(n);
+      if(i<steps-1) delay(500);
+    }
+    String dir = (n==9)?"+":"-";
+    logEvent("MOTION FLIP"+dir+String(steps*5)+"°");
+    server.send(200,"text/plain","Flip "+dir+String(steps*5)+"°");
+  } else {
+    sendMotionBurst(n);
+    const char* lbl[]={"","","EXTEND","EXT_STOP","RETRACT","FLIP_RAISE","FLIP_MID","FLIP_DUMP","NEUTRAL","FLIP+","FLIP-","RANGE_GP5"};
+    logEvent("MOTION "+String(lbl[n]));
+    server.send(200,"text/plain","Motion: "+String(lbl[n]));
+  }
 }
 
 void handleStatePulse() { sendStatePulse(); server.send(200,"text/plain","State pulse #"+String(pulseCount)); }
@@ -648,19 +704,20 @@ void setup() {
   pinMode(TRIG_B,OUTPUT); pinMode(ECHO_B,INPUT);
   pinMode(BUTTON_PIN,INPUT_PULLUP);
   pinMode(STATE_OUT,OUTPUT); digitalWrite(STATE_OUT,LOW);
-  pinMode(SLAVE_TX,OUTPUT);  digitalWrite(SLAVE_TX,LOW);
 
   initMPU();
 
-  // WiFi AP_STA — AP for phone + STA needed for ESP-NOW
+  // WiFi AP_STA: AP for phone, STA for ESP-NOW
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(SSID,PASS);
+  WiFi.disconnect(false);          // keep STA disconnected so AP broadcasts cleanly
+  WiFi.softAP(SSID, PASS);
+  delay(200);                      // give AP time to come up before ESP-NOW init
 
   // ESP-NOW — wireless comms to slave (no wire needed)
   esp_now_init();
   { esp_now_peer_info_t p = {}; memcpy(p.peer_addr, slaveMac, 6); p.channel=0; p.encrypt=false; esp_now_add_peer(&p); }
   Serial.print("Master MAC: "); Serial.println(WiFi.macAddress());
-  delay(100);
+
   IPAddress ip = WiFi.softAPIP();
 
   server.on("/",          handleRoot);
@@ -711,6 +768,7 @@ void loop() {
     }
     if (replayIdx >= replayCount) {
       replaying = false;
+      sendSlaveCmd("6");  // auto-stop motors when replay finishes
       Serial.println("REPLAY COMPLETE");
     }
   }

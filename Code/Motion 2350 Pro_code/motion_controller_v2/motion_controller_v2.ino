@@ -40,22 +40,32 @@ const int STATE_PIN    = 26;
 const int EXTENDER_PIN = 0;
 const int FLIPPER_R    = 1;
 const int FLIPPER_L    = 3;
+const int SERVO5_PIN   = 5;   // GP5 — range-check servo
 const int BUZZER_PIN   = 22;
+
+// Range check limits for GP5 servo (tune to your servo's safe range)
+#define RANGE_MIN  30   // minimum safe angle
+#define RANGE_MAX 150   // maximum safe angle
 
 // *** Verify this pin matches your board's NeoPixel ***
 #define RGB_PIN        28
 #define RGB_COUNT       1   // number of onboard NeoPixels
 
 // ===================================================
-// SERVO PULSE WIDTHS (µs) — continuous rotation
+// EXTENDER (continuous rotation) — pulse widths µs
 // ===================================================
 const int NEUTRAL      = 1500;
 const int EXT_EXTEND   = 1800;
 const int EXT_RETRACT  = 1200;
-const int FLIP_R_RAISE = 1650;
-const int FLIP_L_RAISE = 1350;  // inverted (back-to-back mount)
-const int FLIP_R_DUMP  = 1350;
-const int FLIP_L_DUMP  = 1650;  // inverted
+
+// FLIPPERS (180° servo) — angles in degrees
+// Back-to-back mount: right and left are mirrored.
+// Tune FLIP_RAISE and FLIP_DUMP to match physical range.
+const int FLIP_MID     =  90;   // midpoint — set on startup
+const int FLIP_R_RAISE =  45;   // raise claw   (tune as needed)
+const int FLIP_L_RAISE = 135;   // mirrored
+const int FLIP_R_DUMP  = 135;   // dump rocks   (tune as needed)
+const int FLIP_L_DUMP  =  45;   // mirrored
 
 // ===================================================
 // MELODY — "Samplab_Again" INSTRUMENTAL (Track 0)
@@ -126,11 +136,12 @@ void setLED(uint8_t r, uint8_t g, uint8_t b) {
 Servo extender;
 Servo flipperR;
 Servo flipperL;
+Servo servo5;
 
 void allNeutral() {
-  extender.writeMicroseconds(NEUTRAL);
-  flipperR.writeMicroseconds(NEUTRAL);
-  flipperL.writeMicroseconds(NEUTRAL);
+  extender.writeMicroseconds(NEUTRAL);  // continuous — µs
+  flipperR.write(FLIP_MID);             // 180° — degrees
+  flipperL.write(FLIP_MID);
 }
 
 // ===================================================
@@ -155,9 +166,10 @@ Level currentState = WAITING;
 bool  lastPinState = LOW;
 
 // Current servo positions — tracked for panel UART commands
-int usExt   = 1500;
-int usFlipR = 1500;
-int usFlipL = 1500;
+int usExt          = 1500;
+int usFlipR        = 1500;
+int usFlipL        = 1500;
+int currentFlipDeg = FLIP_MID;  // tracks live flipper angle for nudge commands
 
 void enterState(Level s);  // forward declaration — fixes Arduino enum scope error
 
@@ -204,8 +216,8 @@ void enterState(Level s) {
 
     case RAISEARM:
       extender.writeMicroseconds(NEUTRAL);
-      flipperR.writeMicroseconds(FLIP_R_RAISE);
-      flipperL.writeMicroseconds(FLIP_L_RAISE);
+      flipperR.write(FLIP_R_RAISE);
+      flipperL.write(FLIP_L_RAISE);
       setLED(120, 0, 80);           // magenta
       break;
 
@@ -221,8 +233,8 @@ void enterState(Level s) {
 
     case DEPOSIT:
       extender.writeMicroseconds(NEUTRAL);
-      flipperR.writeMicroseconds(FLIP_R_DUMP);
-      flipperL.writeMicroseconds(FLIP_L_DUMP);
+      flipperR.write(FLIP_R_DUMP);
+      flipperL.write(FLIP_L_DUMP);
       setLED(180, 60, 0);           // orange
       break;
 
@@ -277,17 +289,41 @@ void executeServoCmd(int n) {
     case 2: usExt=EXT_EXTEND;   extender.writeMicroseconds(usExt);  break;
     case 3: usExt=NEUTRAL;      extender.writeMicroseconds(usExt);  break;
     case 4: usExt=EXT_RETRACT;  extender.writeMicroseconds(usExt);  break;
-    case 5: usFlipR=FLIP_R_RAISE; usFlipL=FLIP_L_RAISE;
-            flipperR.writeMicroseconds(usFlipR);
-            flipperL.writeMicroseconds(usFlipL); break;
-    case 6: usFlipR=NEUTRAL; usFlipL=NEUTRAL;
-            flipperR.writeMicroseconds(NEUTRAL);
-            flipperL.writeMicroseconds(NEUTRAL); break;
-    case 7: usFlipR=FLIP_R_DUMP; usFlipL=FLIP_L_DUMP;
-            flipperR.writeMicroseconds(usFlipR);
-            flipperL.writeMicroseconds(usFlipL); break;
-    case 8: allNeutral(); break;
+    case 5: currentFlipDeg=FLIP_R_RAISE;
+            flipperR.write(FLIP_R_RAISE); flipperL.write(FLIP_L_RAISE); break;
+    case 6: currentFlipDeg=FLIP_MID;
+            flipperR.write(FLIP_MID);     flipperL.write(FLIP_MID); break;
+    case 7: currentFlipDeg=FLIP_R_DUMP;
+            flipperR.write(FLIP_R_DUMP);  flipperL.write(FLIP_L_DUMP); break;
+    case 8: currentFlipDeg=FLIP_MID; allNeutral(); break;
+    // 9 = FLIP +5°  |  10 = FLIP -5°
+    case 9:
+      currentFlipDeg = constrain(currentFlipDeg + 5, 0, 180);
+      flipperR.write(currentFlipDeg);
+      flipperL.write(180 - currentFlipDeg);  // mirrored
+      Serial.print("FLIP +5 -> "); Serial.println(currentFlipDeg);
+      break;
+    case 10:
+      currentFlipDeg = constrain(currentFlipDeg - 5, 0, 180);
+      flipperR.write(currentFlipDeg);
+      flipperL.write(180 - currentFlipDeg);
+      Serial.print("FLIP -5 -> "); Serial.println(currentFlipDeg);
+      break;
+    // 11 = Range check on GP5 — slow sweep, safe limits
+    case 11: {
+      Serial.println("RANGE CHECK GP5 start");
+      servo5.write(90); delay(500);
+      for(int p=95; p<=RANGE_MAX; p+=5){ servo5.write(p); delay(150); }
+      for(int p=RANGE_MAX-5; p>=90; p-=5){ servo5.write(p); delay(150); }
+      for(int p=85; p>=RANGE_MIN; p-=5){ servo5.write(p); delay(150); }
+      for(int p=RANGE_MIN+5; p<=90; p+=5){ servo5.write(p); delay(150); }
+      Serial.println("RANGE CHECK GP5 done");
+      break;
+    }
   }
+  // Report current flipper positions after any servo command
+  Serial.print("POS GP1:"); Serial.print(currentFlipDeg);
+  Serial.print(" GP3:"); Serial.println(180 - currentFlipDeg);
 }
 
 // ===================================================
@@ -302,6 +338,8 @@ void setup() {
   extender.attach(EXTENDER_PIN);
   flipperR.attach(FLIPPER_R);
   flipperL.attach(FLIPPER_L);
+  servo5.attach(SERVO5_PIN);
+  servo5.write(90);  // start at midpoint
   allNeutral();
 
   rgb.begin();

@@ -44,7 +44,7 @@
 #define STATE_OUT_PIN  1    // Pulse out to Motion 2350 Pro
 // ESP-NOW slave MAC — from Context/mac_addresses.h and platformio.ini
 #ifndef SLAVE_MAC
-  #define SLAVE_MAC {0x30, 0x30, 0xF9, 0x59, 0xCE, 0xE4}
+  #define SLAVE_MAC {0x30, 0x30, 0xF9, 0x59, 0x31, 0x78}
 #endif
 uint8_t slaveMac[] = SLAVE_MAC;
 
@@ -147,7 +147,7 @@ void readMPU6050() {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x3B);
   Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)14, (bool)true);
+  Wire.requestFrom(MPU_ADDR, 14, true);
 
   int16_t rawAccX  = Wire.read() << 8 | Wire.read();
   int16_t rawAccY  = Wire.read() << 8 | Wire.read();
@@ -258,7 +258,7 @@ void runCalibration() {
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(0x3B);
     Wire.endTransmission(false);
-    Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)14, (bool)true);
+    Wire.requestFrom(MPU_ADDR, 14, true);
 
     int16_t rAX = Wire.read() << 8 | Wire.read();
     int16_t rAY = Wire.read() << 8 | Wire.read();
@@ -436,7 +436,7 @@ void setup() {
   pinMode(ECHO_B,        INPUT);
   pinMode(BUTTON_PIN,    INPUT_PULLUP);
   pinMode(STATE_OUT_PIN, OUTPUT); digitalWrite(STATE_OUT_PIN, LOW);
-  pinMode(SLAVE_TX,      OUTPUT); digitalWrite(SLAVE_TX,      LOW);
+  // SLAVE_TX removed — slave comms now via ESP-NOW (wireless)
   encoderMotorSetup();
 
   tft.init();

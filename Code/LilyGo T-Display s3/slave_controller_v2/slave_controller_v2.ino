@@ -41,12 +41,14 @@
 // ===================================================
 // ESP-NOW receive buffer (written by ISR, read by loop)
 // ===================================================
-volatile uint8_t espNowCmd    = 0xFF;  // 0xFF = empty
+volatile uint8_t espNowCmd    = 0xFF;
+volatile int     espNowSpeed  = -1;    // -1 = use default
 volatile bool    espNowPending = false;
 
 void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
   if (len >= 1) {
-    espNowCmd     = data[0];
+    espNowCmd    = data[0];
+    espNowSpeed  = (len >= 2) ? (int)data[1] * 4 : -1;  // scale 0-255 → 0-1020
     espNowPending = true;
   }
 }
@@ -120,7 +122,6 @@ enum Level {
 };
 
 Level currentState = WAITING;
-bool  lastPinState = LOW;
 
 // ===================================================
 // MOTOR STRUCTS
@@ -131,6 +132,12 @@ struct LinearAct { int in1, in2, en; };
 Motor     leftMotor  = { LM_In1, LM_In2, LM_En, 0 };
 Motor     rightMotor = { RM_In1, RM_In2, RM_En, 2 };
 LinearAct actuator   = { LA_In1, LA_In2, LA_En    };
+
+// Forward declarations — prevents Arduino auto-decl before structs are defined
+void motorSetup(Motor m);
+void setMotor(Motor m, int dir, int spd);
+void setActuator(LinearAct l, int dir);
+void enterState(Level s);
 
 // ===================================================
 // MOTOR FUNCTIONS
@@ -176,8 +183,8 @@ void driveForward(int spd)  { setMotor(leftMotor, -1, spd); setMotor(rightMotor,
 void driveBackward(int spd) { setMotor(leftMotor,  1, spd); setMotor(rightMotor, -1, (int)(spd * RM_CORRECTION)); }
 // Turn left: left wheel back at +20% speed, right stopped
 // Turn right: right wheel back at +20% speed, left stopped
-void driveTurn(int spd)     { setMotor(leftMotor, 1, (int)(spd * 1.2)); setMotor(rightMotor, 0, 0); }
-void driveTurnRight(int spd){ setMotor(leftMotor, 0, 0); setMotor(rightMotor, -1, (int)(spd * RM_CORRECTION * 1.2)); }
+void driveTurn(int spd)     { setMotor(leftMotor, 1, constrain((int)(spd*1.2),0,1023)); setMotor(rightMotor, 0, 0); }
+void driveTurnRight(int spd){ setMotor(leftMotor, 0, 0); setMotor(rightMotor, -1, constrain((int)(spd*RM_CORRECTION*1.2),0,1023)); }
 
 // ===================================================
 // DISPLAY
@@ -248,16 +255,18 @@ void setup() {
 }
 
 void executeDirectCmd(uint8_t n) {
-  Serial.print("CMD: "); Serial.println(n);
+  int dspd = (espNowSpeed >= 0) ? espNowSpeed : DRIVE_SPEED;
+  int tspd = (espNowSpeed >= 0) ? espNowSpeed : TURN_SPEED;
+  Serial.print("CMD: "); Serial.print(n); Serial.print(" spd:"); Serial.println(dspd);
   switch (n) {
-    case 2: stopActuator(); driveForward(DRIVE_SPEED);   break;
-    case 3: stopActuator(); driveBackward(DRIVE_SPEED);  break;
-    case 4: stopActuator(); driveTurn(TURN_SPEED);       break;
-    case 5: stopActuator(); driveTurnRight(TURN_SPEED);  break;
-    case 6: stopAll();                                   break;
-    case 7: stopMotors(); setActuator(actuator,  1);     break;
-    case 8: stopMotors(); setActuator(actuator, -1);     break;
-    case 9: stopActuator();                              break;
+    case 2: stopActuator(); driveForward(dspd);    break;
+    case 3: stopActuator(); driveBackward(dspd);   break;
+    case 4: stopActuator(); driveTurn(tspd);       break;
+    case 5: stopActuator(); driveTurnRight(tspd);  break;
+    case 6: stopAll();                             break;
+    case 7: stopMotors(); setActuator(actuator,  1); break;
+    case 8: stopMotors(); setActuator(actuator, -1); break;
+    case 9: stopActuator();                        break;
   }
 }
 
@@ -274,6 +283,5 @@ void loop() {
     }
   }
 
-  if (burstCount > 0 && (millis() - lastShortPulse) > 400) {
   delay(5);
 }
