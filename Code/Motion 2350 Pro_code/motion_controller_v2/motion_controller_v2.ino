@@ -52,10 +52,10 @@ const int BUZZER_PIN   = 22;
 const int NEUTRAL      = 1500;
 const int EXT_EXTEND   = 1800;
 const int EXT_RETRACT  = 1200;
-const int FLIP_R_RAISE = 1800;
-const int FLIP_L_RAISE = 1200;  // inverted (back-to-back mount)
-const int FLIP_R_DUMP  = 1200;
-const int FLIP_L_DUMP  = 1800;  // inverted
+const int FLIP_R_RAISE = 1650;
+const int FLIP_L_RAISE = 1350;  // inverted (back-to-back mount)
+const int FLIP_R_DUMP  = 1350;
+const int FLIP_L_DUMP  = 1650;  // inverted
 
 // ===================================================
 // MELODY — "Samplab_Again" INSTRUMENTAL (Track 0)

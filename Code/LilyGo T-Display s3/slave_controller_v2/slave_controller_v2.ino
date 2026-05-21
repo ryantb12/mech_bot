@@ -1,10 +1,14 @@
 // ===================================================
 // SLAVE CONTROLLER v2 — TTGO T-Display S3 #2
 //
-// Receives rising-edge pulses from master on COMMS_PIN.
-// Each pulse advances one state, matching master_controller_v2.
+// Receives commands from master via ESP-NOW (wireless, no wire).
+// MAC addresses defined in Context/mac_addresses.h and platformio.ini.
 //
-// WIRING: master GPIO 17 (SLAVE_TX) --> slave GPIO 18 (COMMS_PIN)
+// ESP-NOW command byte:
+//   0x00 = state advance
+//   0x02–0x09 = direct motor commands
+//
+// MOTION board still uses GPIO pulse: master GPIO 1 → MOTION GP26
 //
 // State | Master state | Slave action
 // ------+--------------+------------------------------
@@ -24,12 +28,32 @@
 
 #include <TFT_eSPI.h>
 #include <SPI.h>
+#include <WiFi.h>
+#include <esp_now.h>
+
+// ===================================================
+// MAC ADDRESS — from Context/mac_addresses.h
+// ===================================================
+#ifndef MASTER_MAC
+  #define MASTER_MAC {0x30, 0x30, 0xF9, 0x59, 0x31, 0x78}
+#endif
+
+// ===================================================
+// ESP-NOW receive buffer (written by ISR, read by loop)
+// ===================================================
+volatile uint8_t espNowCmd    = 0xFF;  // 0xFF = empty
+volatile bool    espNowPending = false;
+
+void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
+  if (len >= 1) {
+    espNowCmd     = data[0];
+    espNowPending = true;
+  }
+}
 
 // ===================================================
 // PIN DEFINITIONS — from schematic SCHLIB_TTGO-T-Display
 // ===================================================
-// Comms in — master GPIO 17 → slave GPIO 18 (TTGO pin 5)
-#define COMMS_PIN  18
 
 // Left wheel motor — MD1 Secondary (U4), A1/2 side
 #define LM_In1  43   // TTGO pin 3
@@ -41,10 +65,14 @@
 #define RM_In2  21   // TTGO pin 7  (was wrongly set to GPIO 8)
 #define RM_En    3   // TTGO pin 21 — LEDC channel 2
 
-// Linear actuator — MD1 Secondary (U4), B1/2 side
+// Linear actuator 1 — MD1 Secondary (U4), B1/2 side
 #define LA_In1   1   // TTGO pin 23
 #define LA_In2   2   // TTGO pin 22
 #define LA_En   11   // TTGO pin 19
+
+// Linear actuator 2 — runs in sync with actuator 1
+#define LA2_In1 13   // TTGO spare
+#define LA2_En  12   // TTGO spare
 
 // ===================================================
 // SPEEDS (0–1023 for 10-bit PWM)
@@ -124,10 +152,18 @@ void setMotor(Motor m, int dir, int spd) {
 }
 
 // direction: 1=raise, -1=lower, 0=stop
+// Actuator 2 (GPIO 13/12) runs in sync — same direction, shared In2 (GPIO 2)
 void setActuator(LinearAct l, int dir) {
-  if (dir == 1)       { digitalWrite(l.in1, HIGH); digitalWrite(l.in2, LOW);  digitalWrite(l.en, HIGH); }
-  else if (dir == -1) { digitalWrite(l.in1, LOW);  digitalWrite(l.in2, HIGH); digitalWrite(l.en, HIGH); }
-  else                { digitalWrite(l.in1, LOW);  digitalWrite(l.in2, LOW);  digitalWrite(l.en, LOW);  }
+  if (dir == 1) {
+    digitalWrite(l.in1, HIGH); digitalWrite(l.in2, LOW);  digitalWrite(l.en, HIGH);
+    digitalWrite(LA2_In1, HIGH); digitalWrite(LA2_En, HIGH);
+  } else if (dir == -1) {
+    digitalWrite(l.in1, LOW);  digitalWrite(l.in2, HIGH); digitalWrite(l.en, HIGH);
+    digitalWrite(LA2_In1, LOW);  digitalWrite(LA2_En, HIGH);
+  } else {
+    digitalWrite(l.in1, LOW);  digitalWrite(l.in2, LOW);  digitalWrite(l.en, LOW);
+    digitalWrite(LA2_In1, LOW);  digitalWrite(LA2_En, LOW);
+  }
 }
 
 void stopMotors()   { setMotor(leftMotor, 0, 0); setMotor(rightMotor, 0, 0); }
@@ -138,7 +174,10 @@ void stopAll()      { stopMotors(); stopActuator(); }
 // RM_CORRECTION reduces right motor speed to compensate mechanical slip
 void driveForward(int spd)  { setMotor(leftMotor, -1, spd); setMotor(rightMotor,  1, (int)(spd * RM_CORRECTION)); }
 void driveBackward(int spd) { setMotor(leftMotor,  1, spd); setMotor(rightMotor, -1, (int)(spd * RM_CORRECTION)); }
-void driveTurn(int spd)     { setMotor(leftMotor,  1, (int)(spd * 0.5)); setMotor(rightMotor,  1, (int)(spd * RM_CORRECTION)); } // L back half-speed, R fwd
+// Turn left: left wheel back at +20% speed, right stopped
+// Turn right: right wheel back at +20% speed, left stopped
+void driveTurn(int spd)     { setMotor(leftMotor, 1, (int)(spd * 1.2)); setMotor(rightMotor, 0, 0); }
+void driveTurnRight(int spd){ setMotor(leftMotor, 0, 0); setMotor(rightMotor, -1, (int)(spd * RM_CORRECTION * 1.2)); }
 
 // ===================================================
 // DISPLAY
@@ -180,37 +219,61 @@ void enterState(Level s) {
 // SETUP
 // ===================================================
 void setup() {
-  pinMode(15, OUTPUT); digitalWrite(15, HIGH);  // power enable — same as testing_movement_v1
+  pinMode(15, OUTPUT); digitalWrite(15, HIGH);
 
   Serial.begin(115200);
 
-  pinMode(COMMS_PIN, INPUT_PULLDOWN);
+  // ESP-NOW — wireless comms from master
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init FAILED");
+  } else {
+    esp_now_register_recv_cb(onEspNowRecv);
+    Serial.print("ESP-NOW ready. Slave MAC: ");
+    Serial.println(WiFi.macAddress());
+  }
 
   motorSetup(leftMotor);
   motorSetup(rightMotor);
   pinMode(LA_In1, OUTPUT); pinMode(LA_In2, OUTPUT); pinMode(LA_En, OUTPUT);
+  pinMode(LA2_In1, OUTPUT); pinMode(LA2_En, OUTPUT);
+  digitalWrite(LA2_In1, LOW); digitalWrite(LA2_En, LOW);
   stopAll();
 
   tft.init(); tft.setRotation(1); tft.fillScreen(TFT_LIGHTGREY);
   enterState(WAITING);
 
-  Serial.println("SLAVE v2 ready — pulses on GPIO 18");
+  Serial.println("SLAVE v2 ready — ESP-NOW");
 }
 
-// ===================================================
-// LOOP
-// ===================================================
-void loop() {
-  bool pinNow = digitalRead(COMMS_PIN);
+void executeDirectCmd(uint8_t n) {
+  Serial.print("CMD: "); Serial.println(n);
+  switch (n) {
+    case 2: stopActuator(); driveForward(DRIVE_SPEED);   break;
+    case 3: stopActuator(); driveBackward(DRIVE_SPEED);  break;
+    case 4: stopActuator(); driveTurn(TURN_SPEED);       break;
+    case 5: stopActuator(); driveTurnRight(TURN_SPEED);  break;
+    case 6: stopAll();                                   break;
+    case 7: stopMotors(); setActuator(actuator,  1);     break;
+    case 8: stopMotors(); setActuator(actuator, -1);     break;
+    case 9: stopActuator();                              break;
+  }
+}
 
-  if (pinNow == HIGH && lastPinState == LOW) {
-    delay(20);
-    if (currentState < DONE) {
-      currentState = (Level)(currentState + 1);
-      enterState(currentState);
+void loop() {
+  if (espNowPending) {
+    uint8_t cmd   = espNowCmd;
+    espNowPending = false;
+    espNowCmd     = 0xFF;
+    if (cmd == 0x00) {
+      Serial.println("STATE ADVANCE via ESP-NOW");
+      if (currentState < DONE) { currentState = (Level)(currentState+1); enterState(currentState); }
+    } else {
+      executeDirectCmd(cmd);
     }
   }
 
-  lastPinState = pinNow;
+  if (burstCount > 0 && (millis() - lastShortPulse) > 400) {
   delay(5);
 }

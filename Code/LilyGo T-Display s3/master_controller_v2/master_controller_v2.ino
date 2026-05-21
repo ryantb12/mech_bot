@@ -17,6 +17,8 @@
 
 #include <TFT_eSPI.h>
 #include <SPI.h>
+#include <WiFi.h>
+#include <esp_now.h>
 #include <Wire.h>
 
 // ===================================================
@@ -40,8 +42,11 @@
 
 // Comms out
 #define STATE_OUT_PIN  1    // Pulse out to Motion 2350 Pro
-#define SLAVE_TX       17   // Master TX → Slave RX
-#define SLAVE_RX       18   // Master RX ← Slave TX (future use)
+// ESP-NOW slave MAC — from Context/mac_addresses.h and platformio.ini
+#ifndef SLAVE_MAC
+  #define SLAVE_MAC {0x30, 0x30, 0xF9, 0x59, 0xCE, 0xE4}
+#endif
+uint8_t slaveMac[] = SLAVE_MAC;
 
 // Encoder motor — arm extend
 #define EM_In1         11
@@ -191,15 +196,17 @@ long readDistanceBCM() { return readUltrasonic(TRIG_B, ECHO_B); }
 // ===================================================
 // COMMS
 // ===================================================
+void sendToSlave(uint8_t cmd) {
+  esp_now_send(slaveMac, &cmd, 1);
+}
+
 void sendPulse() {
-  digitalWrite(STATE_OUT_PIN, HIGH);
-  digitalWrite(SLAVE_TX,      HIGH);
-  delay(100);
-  digitalWrite(STATE_OUT_PIN, LOW);
-  digitalWrite(SLAVE_TX,      LOW);
+  // MOTION board: GPIO pulse
+  digitalWrite(STATE_OUT_PIN, HIGH); delay(100); digitalWrite(STATE_OUT_PIN, LOW);
+  // Slave: ESP-NOW state advance
+  sendToSlave(0x00);
   pulseCount++;
-  Serial.print("PULSE SENT #");
-  Serial.println(pulseCount);
+  Serial.print("PULSE SENT #"); Serial.println(pulseCount);
 }
 
 // ===================================================
@@ -415,18 +422,21 @@ void setup() {
 
   Serial.begin(115200);
 
+  // ESP-NOW — wireless comms to slave (no wire needed)
+  WiFi.mode(WIFI_STA);
+  esp_now_init();
+  { esp_now_peer_info_t p = {}; memcpy(p.peer_addr, slaveMac, 6); p.channel=0; p.encrypt=false; esp_now_add_peer(&p); }
+  Serial.print("Master MAC: "); Serial.println(WiFi.macAddress());
+
+  initMPU6050();
+
   pinMode(TRIG_A,        OUTPUT);
   pinMode(ECHO_A,        INPUT);
   pinMode(TRIG_B,        OUTPUT);
   pinMode(ECHO_B,        INPUT);
   pinMode(BUTTON_PIN,    INPUT_PULLUP);
-  pinMode(STATE_OUT_PIN, OUTPUT);
-  pinMode(SLAVE_TX,      OUTPUT);
-  pinMode(SLAVE_RX,      INPUT);
-  digitalWrite(STATE_OUT_PIN, LOW);
-  digitalWrite(SLAVE_TX,      LOW);
-
-  initMPU6050();
+  pinMode(STATE_OUT_PIN, OUTPUT); digitalWrite(STATE_OUT_PIN, LOW);
+  pinMode(SLAVE_TX,      OUTPUT); digitalWrite(SLAVE_TX,      LOW);
   encoderMotorSetup();
 
   tft.init();

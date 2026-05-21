@@ -1,0 +1,717 @@
+// ===================================================
+// MASTER CONTROL PANEL v2
+// Full debug + tuning panel for master T-Display S3.
+// WiFi AP "Robot-Master" / "robot1234" → 192.168.4.1
+//
+// Features:
+//   • Live sensors: dual ultrasonic, MPU-6050, yaw, temp
+//   • Calibrate IMU / reset yaw
+//   • Slave motor + actuator control (pulse bursts → GPIO17)
+//   • MOTION servo control (pulse bursts → GPIO1)
+//   • Navigate-home: set a bearing with MPU, PID drives back
+//   • Record log with timestamps → download as .txt
+//
+// SLAVE  pulse protocol (GPIO 17 → slave GPIO 18):
+//   Long ≥60ms  = state advance  |  Short burst = direct cmd
+//   2=FWD 3=BACK 4=TURN_L 5=TURN_R 6=STOP 7=ACT_UP 8=ACT_DN 9=ACT_STOP
+//
+// MOTION pulse protocol (GPIO 1 → MOTION GP26):
+//   Long ≥60ms  = state advance  |  Short burst = servo cmd
+//   2=EXT 3=EXT_STOP 4=RETRACT 5=FLIP_RAISE 6=FLIP_STOP 7=FLIP_DUMP 8=NEUTRAL
+// ===================================================
+
+#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <esp_now.h>
+
+// ── WiFi ──────────────────────────────────────────────
+const char* SSID = "Robot-Master";
+const char* PASS = "robot1234";
+WebServer server(80);
+
+// ── Pins ──────────────────────────────────────────────
+#define TRIG_A        2
+#define ECHO_A        3
+#define TRIG_B       43
+#define ECHO_B       44
+#define MPU_SDA      16
+#define MPU_SCL      21
+#define MPU_ADDR   0x68
+#define BUTTON_PIN   10
+#define STATE_OUT     1   // → MOTION GP26
+// ESP-NOW slave MAC — from Context/mac_addresses.h and platformio.ini
+#ifndef SLAVE_MAC
+  #define SLAVE_MAC {0x30, 0x30, 0xF9, 0x59, 0xCE, 0xE4}
+#endif
+uint8_t slaveMac[] = SLAVE_MAC;
+
+#ifdef TFT_LIGHTGREY
+  #undef TFT_LIGHTGREY
+#endif
+#define TFT_LIGHTGREY 0xC618
+TFT_eSPI tft = TFT_eSPI();
+
+// ── Sensors ───────────────────────────────────────────
+float accX,accY,accZ,gyroX,gyroY,gyroZ,temperature;
+float accOffX=0,accOffY=0,accOffZ=0;
+float gyroOffX=0,gyroOffY=0,gyroOffZ=0;
+bool  calibrated = false;
+float yawAngle = 0;
+unsigned long lastGyroTime = 0;
+long  distA = 0, distB = 0;
+int   pulseCount = 0;
+
+// ── Recording ─────────────────────────────────────────
+bool          recording = false;
+unsigned long recStart  = 0;
+String        logBuf    = "";
+
+void logEvent(const String& msg) {
+  if (!recording) return;
+  unsigned long t = millis() - recStart;
+  char ts[14]; sprintf(ts, "%lu.%02lus", t/1000, (t%1000)/10);
+  logBuf += String(ts) + "  " + msg + "\n";
+}
+
+// ── Replay ────────────────────────────────────────────
+struct ReplayCmd { unsigned long timeMs; int type; int value; };
+// type 0=slave UART  1=motion burst  2=state pulse
+const int MAX_REPLAY = 200;
+ReplayCmd replayQueue[MAX_REPLAY];
+int  replayCount = 0, replayIdx = 0;
+bool replaying   = false;
+unsigned long replayStart = 0;
+
+void parseLog() {
+  replayCount = 0;
+  int pos = 0;
+  while (pos < (int)logBuf.length() && replayCount < MAX_REPLAY) {
+    int nl = logBuf.indexOf('\n', pos);
+    if (nl < 0) nl = logBuf.length();
+    String line = logBuf.substring(pos, nl); line.trim(); pos = nl + 1;
+    if (line.length() == 0 || line.startsWith("+") || line.startsWith("-")) continue;
+
+    // Parse timestamp e.g. "1.25s  ..."
+    int si = line.indexOf('s');
+    if (si < 0 || si > 10) continue;
+    unsigned long tms = (unsigned long)(line.substring(0, si).toFloat() * 1000.0f);
+    String rest = line.substring(si + 1); rest.trim();
+
+    int val = 0;
+    int type = -1;
+
+    if (rest.startsWith("SLAVE")) {
+      int p = rest.indexOf("("), n = rest.indexOf("p)");
+      if (p >= 0 && n > p) { val = rest.substring(p+1, n).toInt(); type = 0; }
+    } else if (rest.startsWith("NAV")) {
+      if      (rest.indexOf("TURN_L") >= 0) val = 4;
+      else if (rest.indexOf("TURN_R") >= 0) val = 5;
+      else if (rest.indexOf("FWD")    >= 0) val = 2;
+      else if (rest.indexOf("BACK")   >= 0) val = 3;
+      else if (rest.indexOf("STOP")   >= 0) val = 6;
+      if (val > 0) type = 0;
+    } else if (rest.startsWith("MOTION")) {
+      int p = rest.indexOf("("), n = rest.indexOf("p)");
+      if (p >= 0 && n > p) { val = rest.substring(p+1, n).toInt(); type = 1; }
+    } else if (rest.startsWith("STATE_ADVANCE")) {
+      type = 2; val = 0;
+    }
+
+    if (type >= 0) replayQueue[replayCount++] = {tms, type, val};
+  }
+}
+
+// ── Navigate-home PID ─────────────────────────────────
+float homeYaw     = 0;
+bool  homeSet     = false;
+bool  navigating  = false;
+float pidKp = 2.5f, pidKi = 0.05f, pidKd = 0.8f;
+float pidIntegral = 0, pidPrev = 0;
+unsigned long lastNavCmd = 0;
+
+float normalizeAngle(float a) {
+  while (a >  180) a -= 360;
+  while (a < -180) a += 360;
+  return a;
+}
+
+// ── MPU-6050 ─────────────────────────────────────────
+void initMPU() {
+  Wire.begin(MPU_SDA, MPU_SCL);
+  Wire.beginTransmission(MPU_ADDR); Wire.write(0x6B); Wire.write(0x00); Wire.endTransmission(true);
+  Wire.beginTransmission(MPU_ADDR); Wire.write(0x1C); Wire.write(0x00); Wire.endTransmission(true);
+  Wire.beginTransmission(MPU_ADDR); Wire.write(0x1B); Wire.write(0x00); Wire.endTransmission(true);
+}
+
+void readMPU() {
+  Wire.beginTransmission(MPU_ADDR); Wire.write(0x3B); Wire.endTransmission(false);
+  Wire.requestFrom(MPU_ADDR, 14, true);
+  int16_t rAX=Wire.read()<<8|Wire.read(), rAY=Wire.read()<<8|Wire.read(), rAZ=Wire.read()<<8|Wire.read();
+  int16_t rT =Wire.read()<<8|Wire.read();
+  int16_t rGX=Wire.read()<<8|Wire.read(), rGY=Wire.read()<<8|Wire.read(), rGZ=Wire.read()<<8|Wire.read();
+  accX=rAX/16384.0-accOffX; accY=rAY/16384.0-accOffY; accZ=rAZ/16384.0-accOffZ;
+  gyroX=rGX/131.0-gyroOffX; gyroY=rGY/131.0-gyroOffY; gyroZ=rGZ/131.0-gyroOffZ;
+  temperature=(rT/340.0)+36.53;
+  if(calibrated&&lastGyroTime>0){ float dt=(millis()-lastGyroTime)/1000.0; yawAngle+=gyroZ*dt; }
+  lastGyroTime=millis();
+}
+
+void runCalibration() {
+  const int S=200; float sAX=0,sAY=0,sAZ=0,sGX=0,sGY=0,sGZ=0;
+  for(int i=0;i<S;i++){
+    Wire.beginTransmission(MPU_ADDR); Wire.write(0x3B); Wire.endTransmission(false);
+    Wire.requestFrom(MPU_ADDR, 14, true);
+    int16_t rAX=Wire.read()<<8|Wire.read(),rAY=Wire.read()<<8|Wire.read(),rAZ=Wire.read()<<8|Wire.read();
+    Wire.read(); Wire.read();
+    int16_t rGX=Wire.read()<<8|Wire.read(),rGY=Wire.read()<<8|Wire.read(),rGZ=Wire.read()<<8|Wire.read();
+    sAX+=rAX/16384.0; sAY+=rAY/16384.0; sAZ+=rAZ/16384.0;
+    sGX+=rGX/131.0; sGY+=rGY/131.0; sGZ+=rGZ/131.0; delay(10);
+  }
+  accOffX=sAX/S; accOffY=sAY/S; accOffZ=sAZ/S-1.0;
+  gyroOffX=sGX/S; gyroOffY=sGY/S; gyroOffZ=sGZ/S;
+  calibrated=true; yawAngle=0; lastGyroTime=millis();
+}
+
+// ── Ultrasonic ───────────────────────────────────────
+long ping(int trig,int echo){
+  digitalWrite(trig,LOW); delayMicroseconds(2);
+  digitalWrite(trig,HIGH); delayMicroseconds(10); digitalWrite(trig,LOW);
+  return pulseIn(echo,HIGH,30000)*0.034/2;
+}
+
+// ── ESP-NOW helpers ──────────────────────────────────
+void sendToSlave(uint8_t cmd) {
+  esp_now_send(slaveMac, &cmd, 1);
+  Serial.print("ESP-NOW slave: 0x"); Serial.println(cmd, HEX);
+}
+
+void sendStatePulse(){
+  // MOTION: GPIO pulse | Slave: ESP-NOW state advance (0x00)
+  digitalWrite(STATE_OUT,HIGH); delay(100); digitalWrite(STATE_OUT,LOW);
+  sendToSlave(0x00);
+  pulseCount++;
+  logEvent("STATE_ADVANCE pulse#"+String(pulseCount));
+}
+
+void sendSlaveCmd(const String& s){
+  uint8_t cmd = (uint8_t)s.toInt();
+  if(cmd >= 2 && cmd <= 9) sendToSlave(cmd);
+}
+
+// Short burst on STATE_OUT — MOTION servo commands
+void sendMotionBurst(int n){
+  for(int i=0;i<n;i++){
+    digitalWrite(STATE_OUT,HIGH); delay(50);
+    digitalWrite(STATE_OUT,LOW);  delay(50);
+  }
+}
+
+// ── Navigate-home update (called every loop) ─────────
+void updateNavigation() {
+  if (!navigating || !homeSet) return;
+  if (millis() - lastNavCmd < 250) return;
+  lastNavCmd = millis();
+
+  float error = normalizeAngle(homeYaw - yawAngle);
+  pidIntegral += error * 0.25f;
+  pidIntegral = constrain(pidIntegral, -50, 50);
+  float derivative = (error - pidPrev) / 0.25f;
+  float output = pidKp*error + pidKi*pidIntegral + pidKd*derivative;
+  pidPrev = error;
+
+  bool inFront = abs(error) < 90.0f;
+
+  if (abs(error) > 8.0f) {
+    // Heading correction needed
+    if (output > 0) { sendSlaveCmd("4"); logEvent("NAV TURN_L err="+String(error,1)); }
+    else            { sendSlaveCmd("5"); logEvent("NAV TURN_R err="+String(error,1)); }
+  } else {
+    // Heading OK — drive toward home
+    if (inFront) { sendSlaveCmd("2"); logEvent("NAV FWD yaw="+String(yawAngle,1)); }
+    else         { sendSlaveCmd("3"); logEvent("NAV BACK yaw="+String(yawAngle,1)); }
+  }
+}
+
+// ── Web page ─────────────────────────────────────────
+const char HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head>
+<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Master v2</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,sans-serif;background:#0d0d1a;color:#e0e0e0;padding:10px}
+  h1{color:#00d4ff;text-align:center;margin-bottom:10px;font-size:1.3em}
+  .card{background:#16213e;border-radius:12px;padding:12px;margin-bottom:8px}
+  .card h2{color:#00d4ff;font-size:.85em;text-transform:uppercase;margin-bottom:8px;letter-spacing:1px}
+  .g2{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+  .val{background:#0a0a1a;border-radius:8px;padding:8px;text-align:center}
+  .val .lbl{font-size:.65em;color:#888;margin-bottom:2px}
+  .val .num{font-size:1.1em;color:#fdcb6e;font-weight:bold}
+  .row{display:flex;gap:6px;margin-bottom:6px}
+  .btn{border:none;border-radius:8px;padding:13px 8px;cursor:pointer;font-size:.85em;font-weight:bold;flex:1}
+  .g{background:#00b894;color:#fff} .b{background:#0984e3;color:#fff}
+  .o{background:#e17055;color:#fff} .p{background:#6c5ce7;color:#fff}
+  .gr{background:#636e72;color:#fff} .red{background:#d63031;color:#fff}
+  .teal{background:#00cec9;color:#fff} .full{width:100%;padding:14px}
+  .rec{background:#636e72;color:#fff} .rec.on{background:#d63031}
+  .cal{display:inline-block;padding:2px 7px;border-radius:20px;font-size:.7em;font-weight:bold}
+  .cy{background:#00b894;color:#fff} .cn{background:#d63031;color:#fff}
+  .nav-status{text-align:center;font-size:.85em;color:#fdcb6e;margin-top:4px}
+  .status{background:#0a0a1a;border-radius:8px;padding:7px;text-align:center;font-size:.8em;color:#00d4ff;margin-top:6px}
+  #log{background:#050510;border-radius:8px;padding:8px;font-family:monospace;font-size:.72em;height:160px;overflow-y:auto;color:#00ff88;white-space:pre;margin-top:8px}
+</style></head><body>
+<h1>&#129302; Master Panel v2</h1>
+
+<!-- SENSORS -->
+<div class='card'>
+  <h2>Sensors &nbsp;<span id='cal' class='cal cn'>NOT CAL</span></h2>
+  <div class='g2' style='margin-bottom:6px'>
+    <div class='val'><div class='lbl'>Ultrasonic A (cm)</div><div class='num' id='dA'>--</div></div>
+    <div class='val'><div class='lbl'>Ultrasonic B (cm)</div><div class='num' id='dB'>--</div></div>
+  </div>
+  <div class='g3'>
+    <div class='val'><div class='lbl'>Acc X</div><div class='num' id='aX'>--</div></div>
+    <div class='val'><div class='lbl'>Acc Y</div><div class='num' id='aY'>--</div></div>
+    <div class='val'><div class='lbl'>Acc Z</div><div class='num' id='aZ'>--</div></div>
+  </div>
+  <div class='g3' style='margin-top:6px'>
+    <div class='val'><div class='lbl'>Gyro X</div><div class='num' id='gX'>--</div></div>
+    <div class='val'><div class='lbl'>Gyro Y</div><div class='num' id='gY'>--</div></div>
+    <div class='val'><div class='lbl'>Gyro Z</div><div class='num' id='gZ'>--</div></div>
+  </div>
+  <div class='g3' style='margin-top:6px'>
+    <div class='val'><div class='lbl'>Yaw (&deg;)</div><div class='num' id='yaw'>--</div></div>
+    <div class='val'><div class='lbl'>Temp (&deg;C)</div><div class='num' id='tmp'>--</div></div>
+    <div class='val'><div class='lbl'>Pulses</div><div class='num' id='pls'>--</div></div>
+  </div>
+  <div class='row' style='margin-top:8px'>
+    <button class='btn p' onclick='post("/calibrate")'>CALIBRATE</button>
+    <button class='btn b' onclick='post("/reset_yaw")'>RESET YAW</button>
+    <button class='btn gr' onclick='post("/state_pulse")'>ADV STATE</button>
+  </div>
+</div>
+
+<!-- SLAVE DRIVE -->
+<div class='card'>
+  <h2>Slave — Drive</h2>
+  <div class='row'>
+    <button class='btn g'  onclick='sl(2)'>&#9650; FWD</button>
+    <button class='btn o'  onclick='sl(3)'>&#9660; BACK</button>
+    <button class='btn gr' onclick='sl(6)'>&#9632; STOP</button>
+  </div>
+  <div class='row'>
+    <button class='btn b' onclick='sl(4)'>&#9668; TURN L</button>
+    <button class='btn b' onclick='sl(5)'>TURN R &#9658;</button>
+  </div>
+</div>
+
+<!-- SLAVE ACTUATOR -->
+<div class='card'>
+  <h2>Slave — Actuator</h2>
+  <div class='row'>
+    <button class='btn p' onclick='sl(7)'>&#9650; UP</button>
+    <button class='btn p' onclick='sl(8)'>&#9660; DOWN</button>
+    <button class='btn gr' onclick='sl(9)'>&#9632; STOP</button>
+  </div>
+</div>
+
+<!-- MOTION SERVOS -->
+<div class='card'>
+  <h2>Motion — Servos</h2>
+  <div class='row'>
+    <button class='btn p'  onclick='mo(2)'>EXTEND</button>
+    <button class='btn gr' onclick='mo(3)'>EXT STOP</button>
+    <button class='btn o'  onclick='mo(4)'>RETRACT</button>
+  </div>
+  <div class='row'>
+    <button class='btn p'  onclick='mo(5)'>RAISE</button>
+    <button class='btn gr' onclick='mo(6)'>FLIP STOP</button>
+    <button class='btn o'  onclick='mo(7)'>DUMP</button>
+  </div>
+  <button class='btn red full' onclick='mo(8)' style='margin-top:4px'>ALL NEUTRAL</button>
+</div>
+
+<!-- NAVIGATE HOME -->
+<div class='card'>
+  <h2>Navigate Home (PID heading)</h2>
+  <div class='row'>
+    <button class='btn teal' onclick='postHome()'>&#127968; SET HOME</button>
+    <button class='btn g'    onclick='post("/nav_start")' id='nav_btn'>&#9654; GO HOME</button>
+    <button class='btn red'  onclick='post("/nav_stop")'>&#9632; STOP</button>
+  </div>
+  <div class='nav-status' id='nav_status'>Home not set</div>
+  <div class='g3' style='margin-top:8px'>
+    <div class='val'><div class='lbl'>Home yaw</div><div class='num' id='home_yaw'>--</div></div>
+    <div class='val'><div class='lbl'>Error (&deg;)</div><div class='num' id='nav_err'>--</div></div>
+    <div class='val'><div class='lbl'>PID out</div><div class='num' id='pid_out'>--</div></div>
+  </div>
+</div>
+
+<!-- ROUTE MAP -->
+<div class='card'>
+  <h2>Route Map <span style='font-size:.7em;color:#636e72'>(dead reckoning)</span></h2>
+  <canvas id='map' width='300' height='220' style='width:100%;background:#050510;border-radius:8px;border:1px solid #1a1a3a;display:block'></canvas>
+  <div class='row' style='margin-top:8px'>
+    <button class='btn gr' onclick='clearMap()'>&#10005; CLEAR</button>
+    <button class='btn b'  onclick='centerMap()'>&#8857; CENTER</button>
+  </div>
+</div>
+
+<!-- REPLAY -->
+<div class='card'>
+  <h2>Replay Recorded Sequence</h2>
+  <div class='row'>
+    <button class='btn g'   onclick='startReplay()'>&#9654; REPLAY</button>
+    <button class='btn red' onclick='post("/stopreplay")'>&#9632; STOP</button>
+  </div>
+  <div class='status' id='rep_status'>No replay loaded</div>
+</div>
+
+<!-- RECORD LOG -->
+<div class='card'>
+  <h2>Command Log</h2>
+  <div class='row'>
+    <button class='btn rec' id='rec_btn' onclick='toggleRec()'>&#9210; RECORD</button>
+    <button class='btn b'   onclick='downloadLog()'>&#11015; DOWNLOAD</button>
+    <button class='btn gr'  onclick='clearLog()'>&#10005; CLEAR</button>
+  </div>
+  <div id='log'>-- no log --</div>
+</div>
+
+<div class='status' id='status'>Ready</div>
+
+<script>
+// ── State ──────────────────────────────────────────
+let recActive=false, logPoll=null;
+let moveDir=0;        // 1=fwd -1=back 0=stopped
+let currentYaw=0;
+
+// ── Map ────────────────────────────────────────────
+const CVW=300, CVH=220;
+let trail=[], robotX=CVW/2, robotY=CVH/2;
+let originX=CVW/2, originY=CVH/2;
+let homeMapX=null, homeMapY=null;
+const STEP=3;   // pixels per 500ms tick when moving
+
+function updateMapPos(){
+  if(moveDir!==0){
+    const r=currentYaw*Math.PI/180;
+    robotX+=Math.sin(r)*moveDir*STEP;
+    robotY-=Math.cos(r)*moveDir*STEP;
+  }
+  trail.push({x:robotX,y:robotY});
+  if(trail.length>600) trail.shift();
+  drawMap();
+}
+
+function drawMap(){
+  const canvas=document.getElementById('map');
+  if(!canvas) return;
+  const ctx=canvas.getContext('2d');
+  // Scale canvas pixels to CSS display size
+  const scaleX=canvas.clientWidth/CVW, scaleY=canvas.clientHeight/CVH||1;
+  canvas.width=CVW; canvas.height=CVH;
+
+  // Background
+  ctx.fillStyle='#050510'; ctx.fillRect(0,0,CVW,CVH);
+
+  // Grid
+  ctx.strokeStyle='#111128'; ctx.lineWidth=1;
+  for(let x=0;x<CVW;x+=20){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,CVH); ctx.stroke(); }
+  for(let y=0;y<CVH;y+=20){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(CVW,y); ctx.stroke(); }
+
+  // Origin cross
+  ctx.strokeStyle='#2a2a5a'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(originX-8,originY); ctx.lineTo(originX+8,originY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(originX,originY-8); ctx.lineTo(originX,originY+8); ctx.stroke();
+
+  // Trail
+  if(trail.length>1){
+    ctx.strokeStyle='#00b894'; ctx.lineWidth=2; ctx.beginPath();
+    ctx.moveTo(trail[0].x,trail[0].y);
+    for(let i=1;i<trail.length;i++) ctx.lineTo(trail[i].x,trail[i].y);
+    ctx.stroke();
+  }
+
+  // Home marker (cyan triangle)
+  if(homeMapX!==null){
+    ctx.fillStyle='#00d4ff';
+    ctx.beginPath(); ctx.moveTo(homeMapX,homeMapY-7); ctx.lineTo(homeMapX+5,homeMapY+4); ctx.lineTo(homeMapX-5,homeMapY+4); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#00d4ff'; ctx.font='9px Arial'; ctx.textAlign='center';
+    ctx.fillText('HOME',homeMapX,homeMapY+14);
+  }
+
+  // Robot arrow
+  const yr=currentYaw*Math.PI/180;
+  ctx.save(); ctx.translate(robotX,robotY); ctx.rotate(yr);
+  ctx.fillStyle='#fdcb6e';
+  ctx.beginPath(); ctx.moveTo(0,-10); ctx.lineTo(6,7); ctx.lineTo(0,3); ctx.lineTo(-6,7); ctx.closePath(); ctx.fill();
+  // Direction dot
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(0,-10,2,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // Yaw label
+  ctx.fillStyle='#636e72'; ctx.font='10px Arial'; ctx.textAlign='left';
+  ctx.fillText('Yaw: '+currentYaw.toFixed(1)+'°', 5, CVH-5);
+}
+
+function clearMap(){
+  trail=[]; robotX=originX=CVW/2; robotY=originY=CVH/2;
+  homeMapX=null; homeMapY=null; moveDir=0; drawMap();
+}
+function centerMap(){
+  const dx=CVW/2-robotX, dy=CVH/2-robotY;
+  trail=trail.map(p=>({x:p.x+dx,y:p.y+dy}));
+  if(homeMapX!==null){homeMapX+=dx;homeMapY+=dy;}
+  robotX=CVW/2; robotY=CVH/2; originX+=dx; originY+=dy; drawMap();
+}
+
+// ── Commands ──────────────────────────────────────
+function post(url){ fetch(url).then(r=>r.text()).then(t=>stat(t)).catch(()=>{}); }
+
+function sl(n){
+  if(n===2) moveDir=1;
+  else if(n===3) moveDir=-1;
+  else if(n===6||n===7||n===8||n===9) moveDir=0;
+  // turns: keep moveDir 0
+  fetch('/slave?n='+n).then(r=>r.text()).then(t=>stat(t));
+}
+function mo(n){ fetch('/motion?n='+n).then(r=>r.text()).then(t=>stat(t)); }
+function stat(t){ document.getElementById('status').innerText=t; }
+
+// Override post for set_home to mark on map
+const _origPost=post;
+function postHome(){
+  homeMapX=robotX; homeMapY=robotY;
+  fetch('/set_home').then(r=>r.text()).then(t=>{stat(t);drawMap();});
+}
+
+// ── Sensor refresh ────────────────────────────────
+function refresh(){
+  fetch('/sensors').then(r=>r.json()).then(d=>{
+    document.getElementById('dA').innerText=d.dA>0&&d.dA<400?d.dA+'cm':'n/a';
+    document.getElementById('dB').innerText=d.dB>0&&d.dB<400?d.dB+'cm':'n/a';
+    ['aX','aY','aZ','gX','gY','gZ','yaw','tmp','pls'].forEach(k=>document.getElementById(k).innerText=d[k]);
+    const c=document.getElementById('cal');
+    c.innerText=d.cal?'CALIBRATED':'NOT CAL'; c.className='cal '+(d.cal?'cy':'cn');
+    document.getElementById('home_yaw').innerText=d.homeYaw;
+    document.getElementById('nav_err').innerText=d.navErr;
+    document.getElementById('pid_out').innerText=d.pidOut;
+    document.getElementById('nav_status').innerText=d.navState;
+    currentYaw=parseFloat(d.yaw)||0;
+    updateMapPos();
+  }).catch(()=>{});
+}
+setInterval(refresh,500); refresh();
+
+// ── Record ────────────────────────────────────────
+function toggleRec(){
+  fetch('/record').then(r=>r.text()).then(t=>{
+    recActive=(t==='started');
+    const b=document.getElementById('rec_btn');
+    b.className='btn rec'+(recActive?' on':'');
+    b.innerHTML=recActive?'&#9209; STOP REC':'&#9210; RECORD';
+    if(recActive) logPoll=setInterval(fetchLog,1000);
+    else { clearInterval(logPoll); fetchLog(); }
+  });
+}
+function fetchLog(){
+  fetch('/log').then(r=>r.text()).then(t=>{
+    const el=document.getElementById('log'); el.innerText=t||'-- empty --'; el.scrollTop=el.scrollHeight;
+  });
+}
+function downloadLog(){
+  const a=document.createElement('a'); a.href='/download'; a.download='robot_log.txt'; a.click();
+}
+function startReplay(){
+  fetch('/replay').then(r=>r.text()).then(t=>{
+    document.getElementById('rep_status').innerText=t;
+  });
+}
+function clearLog(){
+  fetch('/clearlog').then(()=>{
+    recActive=false; clearInterval(logPoll);
+    document.getElementById('log').innerText='-- cleared --';
+    const b=document.getElementById('rec_btn'); b.className='btn rec'; b.innerHTML='&#9210; RECORD';
+  });
+}
+</script></body></html>
+)rawliteral";
+
+// ── Nav state for JSON ────────────────────────────────
+float lastNavError = 0, lastPidOut = 0;
+
+// ── Server handlers ───────────────────────────────────
+void handleRoot()    { server.send(200,"text/html",HTML); }
+
+void handleSensors() {
+  float navErr = homeSet ? normalizeAngle(homeYaw - yawAngle) : 0;
+  lastNavError = navErr;
+  float pidO = pidKp*navErr;
+  lastPidOut = pidO;
+  String navState = !homeSet ? "Home not set" :
+                    navigating ? ("Navigating — err="+String(navErr,1)+"°") : "Stopped";
+  String j="{";
+  j+="\"dA\":"+String(distA)+",\"dB\":"+String(distB)+",";
+  j+="\"aX\":"+String(accX,2)+",\"aY\":"+String(accY,2)+",\"aZ\":"+String(accZ,2)+",";
+  j+="\"gX\":"+String(gyroX,1)+",\"gY\":"+String(gyroY,1)+",\"gZ\":"+String(gyroZ,1)+",";
+  j+="\"yaw\":"+String(yawAngle,1)+",\"tmp\":"+String(temperature,1)+",\"pls\":"+String(pulseCount)+",";
+  j+="\"cal\":"+String(calibrated?"true":"false")+",";
+  j+="\"homeYaw\":"+String(homeYaw,1)+",\"navErr\":"+String(navErr,1)+",";
+  j+="\"pidOut\":"+String(pidO,1)+",\"navState\":\""+navState+"\"";
+  j+="}";
+  server.send(200,"application/json",j);
+}
+
+void handleSlave() {
+  int n = server.arg("n").toInt();
+  if(n<2||n>9){ server.send(400,"text/plain","Bad"); return; }
+  sendSlaveCmd(String(n));
+  const char* lbl[]={"","","FWD","BACK","TURN_L","TURN_R","STOP","ACT_UP","ACT_DN","ACT_STOP"};
+  logEvent("SLAVE "+String(lbl[n])+" ("+String(n)+"p)");
+  server.send(200,"text/plain","Slave: "+String(lbl[n]));
+}
+
+void handleMotion() {
+  int n = server.arg("n").toInt();
+  if(n<2||n>8){ server.send(400,"text/plain","Bad"); return; }
+  sendMotionBurst(n);
+  const char* lbl[]={"","","EXTEND","EXT_STOP","RETRACT","FLIP_RAISE","FLIP_STOP","FLIP_DUMP","NEUTRAL"};
+  logEvent("MOTION "+String(lbl[n])+" ("+String(n)+"p)");
+  server.send(200,"text/plain","Motion: "+String(lbl[n]));
+}
+
+void handleStatePulse() { sendStatePulse(); server.send(200,"text/plain","State pulse #"+String(pulseCount)); }
+
+void handleCalibrate() { runCalibration(); logEvent("CALIBRATE"); server.send(200,"text/plain","Calibrated OK"); }
+void handleResetYaw()  { yawAngle=0; lastGyroTime=millis(); logEvent("RESET_YAW"); server.send(200,"text/plain","Yaw=0"); }
+
+void handleSetHome() {
+  homeYaw = yawAngle; homeSet = true;
+  pidIntegral=0; pidPrev=0;
+  logEvent("SET_HOME yaw="+String(homeYaw,1));
+  server.send(200,"text/plain","Home set at yaw="+String(homeYaw,1)+"°");
+}
+
+void handleNavStart() {
+  if(!homeSet){ server.send(200,"text/plain","Set home first"); return; }
+  navigating=true; pidIntegral=0; pidPrev=0; lastNavCmd=0;
+  logEvent("NAV_START");
+  server.send(200,"text/plain","Navigating to yaw="+String(homeYaw,1)+"°");
+}
+
+void handleNavStop() {
+  navigating=false;
+  sendSlaveCmd("6");  // STOP slave motors
+  logEvent("NAV_STOP");
+  server.send(200,"text/plain","Navigation stopped");
+}
+
+void handleRecord() {
+  if(!recording){ recording=true; recStart=millis(); logBuf="+0.00s  [RECORD START]\n"; server.send(200,"text/plain","started"); }
+  else          { recording=false; logBuf+="---  [RECORD STOP]\n"; server.send(200,"text/plain","stopped"); }
+}
+
+void handleReplay() {
+  if (logBuf.length() == 0) { server.send(200,"text/plain","No log recorded"); return; }
+  parseLog();
+  if (replayCount == 0) { server.send(200,"text/plain","Nothing to replay — record first"); return; }
+  replayIdx = 0; replaying = true; replayStart = millis();
+  server.send(200,"text/plain","Replaying "+String(replayCount)+" commands...");
+}
+
+void handleStopReplay() {
+  replaying = false; replayIdx = 0;
+  sendSlaveCmd("6");  // stop slave motors
+  server.send(200,"text/plain","Replay stopped");
+}
+
+void handleLog()      { server.send(200,"text/plain",logBuf); }
+void handleClearLog() { logBuf=""; recording=false; server.send(200,"text/plain","ok"); }
+
+void handleDownload() {
+  server.sendHeader("Content-Disposition","attachment; filename=robot_log.txt");
+  server.sendHeader("Content-Type","text/plain");
+  server.send(200,"text/plain",logBuf);
+}
+
+// ── Setup ─────────────────────────────────────────────
+void setup() {
+  pinMode(15,OUTPUT); digitalWrite(15,HIGH);
+  Serial.begin(115200);
+
+  pinMode(TRIG_A,OUTPUT); pinMode(ECHO_A,INPUT);
+  pinMode(TRIG_B,OUTPUT); pinMode(ECHO_B,INPUT);
+  pinMode(BUTTON_PIN,INPUT_PULLUP);
+  pinMode(STATE_OUT,OUTPUT); digitalWrite(STATE_OUT,LOW);
+  pinMode(SLAVE_TX,OUTPUT);  digitalWrite(SLAVE_TX,LOW);
+
+  initMPU();
+
+  // WiFi AP_STA — AP for phone + STA needed for ESP-NOW
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(SSID,PASS);
+
+  // ESP-NOW — wireless comms to slave (no wire needed)
+  esp_now_init();
+  { esp_now_peer_info_t p = {}; memcpy(p.peer_addr, slaveMac, 6); p.channel=0; p.encrypt=false; esp_now_add_peer(&p); }
+  Serial.print("Master MAC: "); Serial.println(WiFi.macAddress());
+  delay(100);
+  IPAddress ip = WiFi.softAPIP();
+
+  server.on("/",          handleRoot);
+  server.on("/sensors",   handleSensors);
+  server.on("/slave",     handleSlave);
+  server.on("/motion",    handleMotion);
+  server.on("/state_pulse", handleStatePulse);
+  server.on("/calibrate", handleCalibrate);
+  server.on("/reset_yaw", handleResetYaw);
+  server.on("/set_home",  handleSetHome);
+  server.on("/nav_start", handleNavStart);
+  server.on("/nav_stop",  handleNavStop);
+  server.on("/replay",     handleReplay);
+  server.on("/stopreplay", handleStopReplay);
+  server.on("/record",    handleRecord);
+  server.on("/log",       handleLog);
+  server.on("/clearlog",  handleClearLog);
+  server.on("/download",  handleDownload);
+  server.begin();
+
+  tft.init(); tft.setRotation(1); tft.fillScreen(TFT_LIGHTGREY);
+  tft.setTextColor(TFT_BLACK,TFT_LIGHTGREY); tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(2); tft.drawString("MASTER v2",tft.width()/2,25);
+  tft.setTextSize(1);
+  tft.drawString("WiFi: "+String(SSID),tft.width()/2,55);
+  tft.drawString(ip.toString(),tft.width()/2,75);
+  tft.drawString("192.168.4.1",tft.width()/2,92);
+
+  Serial.print("AP: "); Serial.println(ip);
+}
+
+void loop() {
+  server.handleClient();
+  distA = ping(TRIG_A,ECHO_A);
+  distB = ping(TRIG_B,ECHO_B);
+  readMPU();
+  updateNavigation();
+
+  // ── Replay execution ──────────────────────────────
+  if (replaying && replayIdx < replayCount) {
+    unsigned long elapsed = millis() - replayStart;
+    while (replayIdx < replayCount && elapsed >= replayQueue[replayIdx].timeMs) {
+      ReplayCmd& c = replayQueue[replayIdx];
+      if      (c.type == 0) sendSlaveCmd(String(c.value));
+      else if (c.type == 1) sendMotionBurst(c.value);
+      else if (c.type == 2) sendStatePulse();
+      replayIdx++;
+    }
+    if (replayIdx >= replayCount) {
+      replaying = false;
+      Serial.println("REPLAY COMPLETE");
+    }
+  }
+}
