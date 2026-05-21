@@ -148,7 +148,7 @@ void initMPU() {
 
 void readMPU() {
   Wire.beginTransmission(MPU_ADDR); Wire.write(0x3B); Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14, true);
+  Wire.requestFrom(MPU_ADDR, 14, 1);
   int16_t rAX=Wire.read()<<8|Wire.read(), rAY=Wire.read()<<8|Wire.read(), rAZ=Wire.read()<<8|Wire.read();
   int16_t rT =Wire.read()<<8|Wire.read();
   int16_t rGX=Wire.read()<<8|Wire.read(), rGY=Wire.read()<<8|Wire.read(), rGZ=Wire.read()<<8|Wire.read();
@@ -163,7 +163,7 @@ void runCalibration() {
   const int S=200; float sAX=0,sAY=0,sAZ=0,sGX=0,sGY=0,sGZ=0;
   for(int i=0;i<S;i++){
     Wire.beginTransmission(MPU_ADDR); Wire.write(0x3B); Wire.endTransmission(false);
-    Wire.requestFrom(MPU_ADDR, 14, true);
+    Wire.requestFrom(MPU_ADDR, 14, 1);
     int16_t rAX=Wire.read()<<8|Wire.read(),rAY=Wire.read()<<8|Wire.read(),rAZ=Wire.read()<<8|Wire.read();
     Wire.read(); Wire.read();
     int16_t rGX=Wire.read()<<8|Wire.read(),rGY=Wire.read()<<8|Wire.read(),rGZ=Wire.read()<<8|Wire.read();
@@ -620,7 +620,7 @@ void handleSlave() {
 
 void handleMotion() {
   int n   = server.arg("n").toInt();
-  int inc = max(1, server.arg("inc").toInt());
+  int inc = max(1, (int)server.arg("inc").toInt());
   if(n<2||n>11){ server.send(400,"text/plain","Bad"); return; }
 
   if((n==9||n==10) && inc>5) {
