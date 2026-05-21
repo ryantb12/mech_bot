@@ -183,8 +183,10 @@ void driveForward(int spd)  { setMotor(leftMotor, -1, spd); setMotor(rightMotor,
 void driveBackward(int spd) { setMotor(leftMotor,  1, spd); setMotor(rightMotor, -1, (int)(spd * RM_CORRECTION)); }
 // Turn left: left wheel back at +20% speed, right stopped
 // Turn right: right wheel back at +20% speed, left stopped
-void driveTurn(int spd)     { setMotor(leftMotor, 1, constrain((int)(spd*1.2),0,1023)); setMotor(rightMotor, 0, 0); }
-void driveTurnRight(int spd){ setMotor(leftMotor, 0, 0); setMotor(rightMotor, -1, constrain((int)(spd*RM_CORRECTION*1.2),0,1023)); }
+// Turn left:  left wheel back, right wheel forward
+// Turn right: left wheel forward, right wheel back
+void driveTurn(int spd)      { setMotor(leftMotor,  1, spd); setMotor(rightMotor,  1, (int)(spd*RM_CORRECTION)); }
+void driveTurnRight(int spd) { setMotor(leftMotor, -1, spd); setMotor(rightMotor, -1, (int)(spd*RM_CORRECTION)); }
 
 // ===================================================
 // DISPLAY

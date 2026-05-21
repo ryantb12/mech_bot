@@ -207,12 +207,27 @@ void sendSlaveCmd(const String& s, int speed = -1){
   if(cmd >= 2 && cmd <= 9) sendToSlave(cmd, speed);
 }
 
+// Track current flipper angle on master — keep in sync with MOTION board
+#define FLIP_R_RAISE_DEG  45
+#define FLIP_R_DUMP_DEG  135
+int motionFlipDeg = 90;
+
 // Short burst on STATE_OUT — MOTION servo commands
+// 15ms pulses: fast enough for burst 57 (180° abs) in ~1.7s
 void sendMotionBurst(int n){
   for(int i=0;i<n;i++){
-    digitalWrite(STATE_OUT,HIGH); delay(50);
-    digitalWrite(STATE_OUT,LOW);  delay(50);
+    digitalWrite(STATE_OUT,HIGH); delay(15);
+    digitalWrite(STATE_OUT,LOW);  delay(15);
   }
+}
+
+// Send absolute flipper angle as a single burst (no intermediate hops)
+void sendFlipAbsolute(int angle){
+  motionFlipDeg = ((constrain(angle, 0, 180) + 2) / 5) * 5;  // round to nearest 5°
+  int burst = 21 + (motionFlipDeg / 5);  // 21–57
+  sendMotionBurst(burst);
+  Serial.print("FLIP ABS burst:"); Serial.print(burst);
+  Serial.print(" -> "); Serial.println(motionFlipDeg);
 }
 
 // ── Navigate-home update (called every loop) ─────────
@@ -337,6 +352,11 @@ const char HTML[] PROGMEM = R"rawliteral(
     <button class='btn o'  onclick='mo(4)'>RETRACT</button>
   </div>
   <div class='row'>
+    <button class='btn b' onclick='extTimed(1000)'>EXT 1s</button>
+    <button class='btn b' onclick='extTimed(3000)'>EXT 3s</button>
+    <button class='btn b' onclick='extTimed(5000)'>EXT 5s</button>
+  </div>
+  <div class='row'>
     <button class='btn p'  onclick='mo(5)'>RAISE</button>
     <button class='btn gr' onclick='mo(6)'>FLIP MID</button>
     <button class='btn o'  onclick='mo(7)'>DUMP</button>
@@ -358,7 +378,18 @@ const char HTML[] PROGMEM = R"rawliteral(
       <div style='font-size:1.1em;color:#a29bfe;font-weight:bold' id='pos_gp3'>90°</div>
     </div>
   </div>
-  <button class='btn teal full' onclick='mo(11)' style='margin-top:6px'>&#9654; RANGE CHECK GP5</button>
+  <label style='font-size:.8em;color:#aaa;margin:8px 0 3px;display:block'>Go to position: <span id='flip_pos_lbl'>90</span>°</label>
+  <input type='range' min='0' max='180' value='90' id='flip_pos_sl' style='width:100%;height:28px;accent-color:#00cec9;margin-bottom:6px'
+    oninput="document.getElementById('flip_pos_lbl').innerText=this.value">
+  <button class='btn teal full' onclick='gotoFlipPos()' style='margin-bottom:6px'>&#8594; GO TO POSITION</button>
+  <button class='btn teal full' id='range_btn' onclick='startRangeCheck()' style='margin-top:0'>&#9654; RANGE CHECK GP5</button>
+  <div style='margin-top:8px;background:#0a0a1a;border-radius:8px;padding:8px'>
+    <div style='display:flex;justify-content:space-between;font-size:.7em;color:#888;margin-bottom:4px'>
+      <span>GP5 Sweep</span><span id='range_deg' style='color:#00cec9'>-- °</span>
+    </div>
+    <canvas id='range_canvas' width='280' height='100' style='width:100%;background:#050510;border-radius:6px;display:block'></canvas>
+    <div id='range_status' style='text-align:center;font-size:.75em;color:#636e72;margin-top:4px'>Press RANGE CHECK to sweep</div>
+  </div>
   <button class='btn red full' onclick='mo(8)' style='margin-top:4px'>ALL NEUTRAL</button>
 </div>
 
@@ -548,6 +579,7 @@ function refresh(){
   }).catch(()=>{});
 }
 setInterval(refresh,500); refresh();
+drawServoArm(90);
 
 // ── Record ────────────────────────────────────────
 function toggleRec(){
@@ -573,6 +605,110 @@ function startReplay(){
     document.getElementById('rep_status').innerText=t;
   });
 }
+// ── Range check animation ─────────────────────────
+function drawServoArm(deg){
+  const canvas=document.getElementById('range_canvas');
+  if(!canvas) return;
+  const ctx=canvas.getContext('2d');
+  const W=canvas.width, H=canvas.height;
+  const cx=W/2, cy=H-10, r=70;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#050510'; ctx.fillRect(0,0,W,H);
+  // Arc background (30° to 150°)
+  ctx.strokeStyle='#1a1a3a'; ctx.lineWidth=12; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.arc(cx,cy,r, Math.PI*(1-150/180), Math.PI*(1-30/180));
+  ctx.stroke();
+  // Swept arc (mid to current)
+  ctx.strokeStyle='#00cec9'; ctx.lineWidth=12;
+  const startRad = Math.PI*(1-90/180);
+  const endRad   = Math.PI*(1-deg/180);
+  ctx.beginPath();
+  if(deg>=90) ctx.arc(cx,cy,r, startRad, endRad);
+  else        ctx.arc(cx,cy,r, endRad, startRad);
+  ctx.stroke();
+  // Min/max markers
+  ctx.strokeStyle='#2a2a5a'; ctx.lineWidth=2;
+  [30,90,150].forEach(a=>{
+    const rad=Math.PI*(1-a/180);
+    ctx.beginPath();
+    ctx.moveTo(cx+(r-8)*Math.cos(rad), cy+(r-8)*Math.sin(-rad));
+    ctx.lineTo(cx+(r+8)*Math.cos(rad), cy+(r+8)*Math.sin(-rad));
+    ctx.stroke();
+    ctx.fillStyle='#444'; ctx.font='9px Arial'; ctx.textAlign='center';
+    ctx.fillText(a+'°', cx+(r+20)*Math.cos(rad), cy+(r+20)*Math.sin(-rad)+4);
+  });
+  // Arm
+  const armRad=Math.PI*(1-deg/180);
+  ctx.strokeStyle='#fdcb6e'; ctx.lineWidth=3; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(cx+r*Math.cos(armRad), cy+r*Math.sin(-armRad));
+  ctx.stroke();
+  ctx.fillStyle='#fdcb6e';
+  ctx.beginPath(); ctx.arc(cx,cy,5,0,Math.PI*2); ctx.fill();
+  document.getElementById('range_deg').innerText=Math.round(deg)+'°';
+}
+
+function extTimed(ms){
+  stat('Extending '+ms/1000+'s...');
+  fetch('/extend_timed?ms='+ms).then(r=>r.text()).then(t=>stat(t));
+}
+function gotoFlipPos(){
+  const angle = Math.round(parseInt(document.getElementById('flip_pos_sl').value)/5)*5;
+  fetch('/motion_abs?angle='+angle).then(r=>r.text()).then(t=>{
+    stat(t);
+    flipPos=angle;
+    document.getElementById('pos_gp1').innerText=angle+'°';
+    document.getElementById('pos_gp3').innerText=(180-angle)+'°';
+  });
+}
+function startRangeCheck(){
+  const btn=document.getElementById('range_btn');
+  btn.disabled=true; btn.style.opacity='0.5';
+  document.getElementById('range_status').style.color='#00cec9';
+  const inc = document.getElementById('flip_inc') ? parseInt(document.getElementById('flip_inc').value) : 5;
+  document.getElementById('range_status').innerText='Sweeping ('+inc+'° steps)...';
+  mo(11);  // send command to MOTION board
+  // Animate using slider increment — time per step scales with increment size
+  const msPerStep = Math.max(150, inc * 30);  // larger steps = more time visible
+  const RMIN=30, RMAX=150, MID=90;
+  const steps=[];
+  steps.push({t:0, deg:MID});
+  let t=500;
+  for(let d=MID+inc;d<=RMAX;d+=inc){ steps.push({t,deg:Math.min(d,RMAX)}); t+=msPerStep; }
+  for(let d=RMAX-inc;d>=MID;d-=inc){ steps.push({t,deg:Math.max(d,MID)});  t+=msPerStep; }
+  t+=300;
+  for(let d=MID-inc;d>=RMIN;d-=inc){ steps.push({t,deg:Math.max(d,RMIN)}); t+=msPerStep; }
+  for(let d=RMIN+inc;d<=MID;d+=inc){ steps.push({t,deg:Math.min(d,MID)});  t+=msPerStep; }
+  steps.push({t:t+300,deg:MID});
+  const totalMs=t+600;
+  const start=performance.now();
+  let si=0;
+  function animate(now){
+    const elapsed=now-start;
+    while(si<steps.length-1 && steps[si+1].t<=elapsed) si++;
+    // interpolate
+    if(si<steps.length-1){
+      const t0=steps[si].t, t1=steps[si+1].t;
+      const frac=(elapsed-t0)/Math.max(1,t1-t0);
+      drawServoArm(steps[si].deg+(steps[si+1].deg-steps[si].deg)*frac);
+    } else {
+      drawServoArm(90);
+    }
+    if(elapsed<totalMs){
+      requestAnimationFrame(animate);
+    } else {
+      document.getElementById('range_status').innerText='Complete — check Serial for limits';
+      document.getElementById('range_status').style.color='#00b894';
+      btn.disabled=false; btn.style.opacity='1';
+      drawServoArm(90);
+    }
+  }
+  drawServoArm(90);
+  requestAnimationFrame(animate);
+}
+
 function clearLog(){
   fetch('/clearlog').then(()=>{
     recActive=false; clearInterval(logPoll);
@@ -612,10 +748,13 @@ void handleSlave() {
   int n = server.arg("n").toInt();
   int s = server.arg("s").toInt();  // speed from slider (0 if not provided)
   if(n<2||n>9){ server.send(400,"text/plain","Bad"); return; }
+  int spd = s > 0 ? s : 700;
   sendSlaveCmd(String(n), s > 0 ? s : -1);
   const char* lbl[]={"","","FWD","BACK","TURN_L","TURN_R","STOP","ACT_UP","ACT_DN","ACT_STOP"};
-  logEvent("SLAVE "+String(lbl[n])+" ("+String(n)+"p)");
-  server.send(200,"text/plain","Slave: "+String(lbl[n]));
+  // Include speed for drive/turn commands, omit for stop/actuator
+  if(n>=2 && n<=5) logEvent("SLAVE "+String(lbl[n])+"  spd="+String(spd));
+  else             logEvent("SLAVE "+String(lbl[n]));
+  server.send(200,"text/plain","Slave: "+String(lbl[n])+" @ "+String(spd));
 }
 
 void handleMotion() {
@@ -623,20 +762,26 @@ void handleMotion() {
   int inc = max(1, (int)server.arg("inc").toInt());
   if(n<2||n>11){ server.send(400,"text/plain","Bad"); return; }
 
-  if((n==9||n==10) && inc>5) {
-    // Fire multiple +5° bursts for increments larger than 5°
-    int steps = max(1, (int)round((float)inc/5.0f));
-    for(int i=0;i<steps;i++){
-      sendMotionBurst(n);
-      if(i<steps-1) delay(500);
-    }
+  if(n==9 || n==10) {
+    // Absolute positioning — one burst, no intermediate hops
+    motionFlipDeg = constrain(motionFlipDeg + (n==9 ? inc : -inc), 0, 180);
+    sendFlipAbsolute(motionFlipDeg);
     String dir = (n==9)?"+":"-";
-    logEvent("MOTION FLIP"+dir+String(steps*5)+"°");
-    server.send(200,"text/plain","Flip "+dir+String(steps*5)+"°");
+    logEvent("MOTION FLIP"+dir+String(inc)+"° -> "+String(motionFlipDeg)+"°");
+    server.send(200,"text/plain","Flip -> "+String(motionFlipDeg)+"°");
   } else {
+    // Sync motionFlipDeg for preset commands
+    if(n==5) motionFlipDeg=FLIP_R_RAISE_DEG;
+    else if(n==6||n==8) motionFlipDeg=90;
+    else if(n==7) motionFlipDeg=FLIP_R_DUMP_DEG;
     sendMotionBurst(n);
     const char* lbl[]={"","","EXTEND","EXT_STOP","RETRACT","FLIP_RAISE","FLIP_MID","FLIP_DUMP","NEUTRAL","FLIP+","FLIP-","RANGE_GP5"};
-    logEvent("MOTION "+String(lbl[n]));
+    // Include angle for flip presets
+    if(n==5)      logEvent("MOTION FLIP_RAISE  GP1="+String(FLIP_R_RAISE_DEG)+"° GP3="+String(180-FLIP_R_RAISE_DEG)+"°");
+    else if(n==6) logEvent("MOTION FLIP_MID    GP1=90° GP3=90°");
+    else if(n==7) logEvent("MOTION FLIP_DUMP   GP1="+String(FLIP_R_DUMP_DEG)+"° GP3="+String(180-FLIP_R_DUMP_DEG)+"°");
+    else if(n==8) logEvent("MOTION ALL_NEUTRAL GP1=90° GP3=90°");
+    else          logEvent("MOTION "+String(lbl[n]));
     server.send(200,"text/plain","Motion: "+String(lbl[n]));
   }
 }
@@ -686,6 +831,22 @@ void handleStopReplay() {
   server.send(200,"text/plain","Replay stopped");
 }
 
+void handleExtendTimed() {
+  int ms = server.arg("ms").toInt();
+  sendMotionBurst(2);   // EXTEND
+  delay(ms);
+  sendMotionBurst(3);   // EXT_STOP
+  logEvent("MOTION EXTEND_TIMED  duration="+String(ms/1000)+"s");
+  server.send(200,"text/plain","Extended "+String(ms/1000)+"s");
+}
+
+void handleMotionAbs() {
+  int angle = server.arg("angle").toInt();
+  sendFlipAbsolute(angle);
+  logEvent("MOTION FLIP_ABS "+String(motionFlipDeg)+"°");
+  server.send(200,"text/plain","Flip -> "+String(motionFlipDeg)+"°");
+}
+
 void handleLog()      { server.send(200,"text/plain",logBuf); }
 void handleClearLog() { logBuf=""; recording=false; server.send(200,"text/plain","ok"); }
 
@@ -732,6 +893,8 @@ void setup() {
   server.on("/nav_stop",  handleNavStop);
   server.on("/replay",     handleReplay);
   server.on("/stopreplay", handleStopReplay);
+  server.on("/extend_timed", handleExtendTimed);
+  server.on("/motion_abs",   handleMotionAbs);
   server.on("/record",    handleRecord);
   server.on("/log",       handleLog);
   server.on("/clearlog",  handleClearLog);

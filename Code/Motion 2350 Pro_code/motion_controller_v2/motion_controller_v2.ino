@@ -309,6 +309,15 @@ void executeServoCmd(int n) {
       flipperL.write(180 - currentFlipDeg);
       Serial.print("FLIP -5 -> "); Serial.println(currentFlipDeg);
       break;
+    // 21–57 = absolute angle: (n-21)*5 degrees (0°–180° in 5° steps)
+    default:
+      if (n >= 21 && n <= 57) {
+        currentFlipDeg = (n - 21) * 5;
+        flipperR.write(currentFlipDeg);
+        flipperL.write(180 - currentFlipDeg);
+        Serial.print("FLIP ABS -> "); Serial.println(currentFlipDeg);
+      }
+      break;
     // 11 = Range check on GP5 — slow sweep, safe limits
     case 11: {
       Serial.println("RANGE CHECK GP5 start");
@@ -336,8 +345,10 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
 
   extender.attach(EXTENDER_PIN);
-  flipperR.attach(FLIPPER_R);
-  flipperL.attach(FLIPPER_L);
+  // 500–2500µs maps write(0–180) to the full physical range
+  // If servo still doesn't reach endpoints, tune min/max below
+  flipperR.attach(FLIPPER_R, 500, 2500);
+  flipperL.attach(FLIPPER_L, 500, 2500);
   servo5.attach(SERVO5_PIN);
   servo5.write(90);  // start at midpoint
   allNeutral();

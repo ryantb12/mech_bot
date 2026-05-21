@@ -79,8 +79,10 @@ void stopMotors() {
 // rmCorrection reduces right speed to compensate for mechanical slip.
 void driveForward(int s)  { setMotor(left, -1, (int)(s * lmCorrection)); setMotor(right,  1, (int)(s * rmCorrection)); }
 void driveBackward(int s) { setMotor(left,  1, (int)(s * lmCorrection)); setMotor(right, -1, (int)(s * rmCorrection)); }
-void turnLeft(int s)      { setMotor(left,  1, (int)(s * lmCorrection * 0.5)); setMotor(right,  1, (int)(s * rmCorrection)); }
-void turnRight(int s)     { setMotor(left, -1, (int)(s * lmCorrection));       setMotor(right, -1, (int)(s * rmCorrection * 0.5)); }
+// Turn left:  left wheel back, right wheel forward
+// Turn right: left wheel forward, right wheel back
+void turnLeft(int s)  { setMotor(left,  1, (int)(s*lmCorrection)); setMotor(right,  1, (int)(s*rmCorrection)); }
+void turnRight(int s) { setMotor(left, -1, (int)(s*lmCorrection)); setMotor(right, -1, (int)(s*rmCorrection)); }
 
 void setActuator(int dir) {
     if      (dir ==  1) { digitalWrite(LA_In1, HIGH); digitalWrite(LA_In2, LOW);  digitalWrite(LA_En, HIGH); }
