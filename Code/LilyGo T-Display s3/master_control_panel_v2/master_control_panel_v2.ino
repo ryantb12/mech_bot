@@ -341,6 +341,16 @@ const char HTML[] PROGMEM = R"rawliteral(
     <button class='btn p' onclick='sl(8)'>&#9660; DOWN</button>
     <button class='btn gr' onclick='sl(9)'>&#9632; STOP</button>
   </div>
+  <div class='row'>
+    <button class='btn p' onclick='actTimed("up",1000)'>UP 1s</button>
+    <button class='btn p' onclick='actTimed("up",3000)'>UP 3s</button>
+    <button class='btn p' onclick='actTimed("up",5000)'>UP 5s</button>
+  </div>
+  <div class='row'>
+    <button class='btn o' onclick='actTimed("dn",1000)'>DN 1s</button>
+    <button class='btn o' onclick='actTimed("dn",3000)'>DN 3s</button>
+    <button class='btn o' onclick='actTimed("dn",5000)'>DN 5s</button>
+  </div>
 </div>
 
 <!-- MOTION SERVOS -->
@@ -355,6 +365,10 @@ const char HTML[] PROGMEM = R"rawliteral(
     <button class='btn b' onclick='extTimed(1000)'>EXT 1s</button>
     <button class='btn b' onclick='extTimed(3000)'>EXT 3s</button>
     <button class='btn b' onclick='extTimed(5000)'>EXT 5s</button>
+  </div>
+  <div class='row'>
+    <button class='btn o' onclick='retractTimed(1000)'>RETR 1s</button>
+    <button class='btn o' onclick='retractTimed(2000)'>RETR 2s</button>
   </div>
   <div class='row'>
     <button class='btn p'  onclick='mo(5)'>RAISE</button>
@@ -654,6 +668,14 @@ function extTimed(ms){
   stat('Extending '+ms/1000+'s...');
   fetch('/extend_timed?ms='+ms).then(r=>r.text()).then(t=>stat(t));
 }
+function retractTimed(ms){
+  stat('Retracting '+ms/1000+'s...');
+  fetch('/retract_timed?ms='+ms).then(r=>r.text()).then(t=>stat(t));
+}
+function actTimed(dir,ms){
+  stat((dir==='up'?'Actuator UP ':'Actuator DN ')+ms/1000+'s...');
+  fetch('/actuator_timed?dir='+dir+'&ms='+ms).then(r=>r.text()).then(t=>stat(t));
+}
 function gotoFlipPos(){
   const angle = Math.round(parseInt(document.getElementById('flip_pos_sl').value)/5)*5;
   fetch('/motion_abs?angle='+angle).then(r=>r.text()).then(t=>{
@@ -751,9 +773,9 @@ void handleSlave() {
   int spd = s > 0 ? s : 700;
   sendSlaveCmd(String(n), s > 0 ? s : -1);
   const char* lbl[]={"","","FWD","BACK","TURN_L","TURN_R","STOP","ACT_UP","ACT_DN","ACT_STOP"};
-  // Include speed for drive/turn commands, omit for stop/actuator
-  if(n>=2 && n<=5) logEvent("SLAVE "+String(lbl[n])+"  spd="+String(spd));
-  else             logEvent("SLAVE "+String(lbl[n]));
+  // (Np) pattern preserved for replay parser; extra info appended
+  if(n>=2 && n<=5) logEvent("SLAVE "+String(lbl[n])+" ("+String(n)+"p) spd="+String(spd));
+  else             logEvent("SLAVE "+String(lbl[n])+" ("+String(n)+"p)");
   server.send(200,"text/plain","Slave: "+String(lbl[n])+" @ "+String(spd));
 }
 
@@ -777,11 +799,12 @@ void handleMotion() {
     sendMotionBurst(n);
     const char* lbl[]={"","","EXTEND","EXT_STOP","RETRACT","FLIP_RAISE","FLIP_MID","FLIP_DUMP","NEUTRAL","FLIP+","FLIP-","RANGE_GP5"};
     // Include angle for flip presets
-    if(n==5)      logEvent("MOTION FLIP_RAISE  GP1="+String(FLIP_R_RAISE_DEG)+"° GP3="+String(180-FLIP_R_RAISE_DEG)+"°");
-    else if(n==6) logEvent("MOTION FLIP_MID    GP1=90° GP3=90°");
-    else if(n==7) logEvent("MOTION FLIP_DUMP   GP1="+String(FLIP_R_DUMP_DEG)+"° GP3="+String(180-FLIP_R_DUMP_DEG)+"°");
-    else if(n==8) logEvent("MOTION ALL_NEUTRAL GP1=90° GP3=90°");
-    else          logEvent("MOTION "+String(lbl[n]));
+    // (Np) pattern preserved for replay parser
+    if(n==5)      logEvent("MOTION FLIP_RAISE (5p) GP1="+String(FLIP_R_RAISE_DEG)+"° GP3="+String(180-FLIP_R_RAISE_DEG)+"°");
+    else if(n==6) logEvent("MOTION FLIP_MID (6p) GP1=90° GP3=90°");
+    else if(n==7) logEvent("MOTION FLIP_DUMP (7p) GP1="+String(FLIP_R_DUMP_DEG)+"° GP3="+String(180-FLIP_R_DUMP_DEG)+"°");
+    else if(n==8) logEvent("MOTION ALL_NEUTRAL (8p) GP1=90° GP3=90°");
+    else          logEvent("MOTION "+String(lbl[n])+" ("+String(n)+"p)");
     server.send(200,"text/plain","Motion: "+String(lbl[n]));
   }
 }
@@ -833,11 +856,36 @@ void handleStopReplay() {
 
 void handleExtendTimed() {
   int ms = server.arg("ms").toInt();
-  sendMotionBurst(2);   // EXTEND
+  logEvent("MOTION EXTEND (2p) duration="+String(ms/1000)+"s");
+  sendMotionBurst(2);
   delay(ms);
-  sendMotionBurst(3);   // EXT_STOP
-  logEvent("MOTION EXTEND_TIMED  duration="+String(ms/1000)+"s");
+  sendMotionBurst(3);
+  logEvent("MOTION EXT_STOP (3p)");
   server.send(200,"text/plain","Extended "+String(ms/1000)+"s");
+}
+
+void handleRetractTimed() {
+  int ms = server.arg("ms").toInt();
+  logEvent("MOTION RETRACT (4p) duration="+String(ms/1000)+"s");
+  sendMotionBurst(4);
+  delay(ms);
+  sendMotionBurst(3);
+  logEvent("MOTION EXT_STOP (3p)");
+  server.send(200,"text/plain","Retracted "+String(ms/1000)+"s");
+}
+
+void handleActuatorTimed() {
+  String dir = server.arg("dir");
+  int ms     = server.arg("ms").toInt();
+  bool up    = (dir == "up");
+  uint8_t startCmd = up ? 7 : 8;
+  const char* lbl  = up ? "ACT_UP" : "ACT_DN";
+  logEvent("SLAVE "+String(lbl)+" ("+String(startCmd)+"p) duration="+String(ms/1000)+"s");
+  sendToSlave(startCmd);
+  delay(ms);
+  sendToSlave(9);  // ACT_STOP
+  logEvent("SLAVE ACT_STOP (9p)");
+  server.send(200,"text/plain",String(lbl)+" "+String(ms/1000)+"s done");
 }
 
 void handleMotionAbs() {
@@ -893,8 +941,10 @@ void setup() {
   server.on("/nav_stop",  handleNavStop);
   server.on("/replay",     handleReplay);
   server.on("/stopreplay", handleStopReplay);
-  server.on("/extend_timed", handleExtendTimed);
-  server.on("/motion_abs",   handleMotionAbs);
+  server.on("/extend_timed",   handleExtendTimed);
+  server.on("/retract_timed",  handleRetractTimed);
+  server.on("/actuator_timed", handleActuatorTimed);
+  server.on("/motion_abs",     handleMotionAbs);
   server.on("/record",    handleRecord);
   server.on("/log",       handleLog);
   server.on("/clearlog",  handleClearLog);
