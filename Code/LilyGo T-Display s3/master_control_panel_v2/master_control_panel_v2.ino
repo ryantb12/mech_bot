@@ -331,6 +331,21 @@ const char HTML[] PROGMEM = R"rawliteral(
     <button class='btn b' onclick='sl(4)'>&#9668; TURN L</button>
     <button class='btn b' onclick='sl(5)'>TURN R &#9658;</button>
   </div>
+  <div class='row'>
+    <button class='btn g' onclick='driveTimed(2,1000)'>FWD 1s</button>
+    <button class='btn g' onclick='driveTimed(2,2000)'>FWD 2s</button>
+    <button class='btn g' onclick='driveTimed(2,3000)'>FWD 3s</button>
+  </div>
+  <div class='row'>
+    <button class='btn o' onclick='driveTimed(3,1000)'>BCK 1s</button>
+    <button class='btn o' onclick='driveTimed(3,2000)'>BCK 2s</button>
+    <button class='btn o' onclick='driveTimed(3,3000)'>BCK 3s</button>
+  </div>
+  <div class='row'>
+    <button class='btn b' onclick='driveTimed(4,1000)'>TL 1s</button>
+    <button class='btn b' onclick='driveTimed(4,2000)'>TL 2s</button>
+    <button class='btn b' onclick='driveTimed(4,3000)'>TL 3s</button>
+  </div>
 </div>
 
 <!-- SLAVE ACTUATOR -->
@@ -664,6 +679,12 @@ function drawServoArm(deg){
   document.getElementById('range_deg').innerText=Math.round(deg)+'°';
 }
 
+function driveTimed(dir,ms){
+  const spd = document.getElementById('spd_sl') ? document.getElementById('spd_sl').value : 700;
+  const names={2:'FWD',3:'BACK',4:'TURN_L'};
+  stat((names[dir]||'DRIVE')+' '+ms/1000+'s...');
+  fetch('/drive_timed?dir='+dir+'&ms='+ms+'&s='+spd).then(r=>r.text()).then(t=>stat(t));
+}
 function extTimed(ms){
   stat('Extending '+ms/1000+'s...');
   fetch('/extend_timed?ms='+ms).then(r=>r.text()).then(t=>stat(t));
@@ -854,6 +875,20 @@ void handleStopReplay() {
   server.send(200,"text/plain","Replay stopped");
 }
 
+void handleDriveTimed() {
+  int dir = server.arg("dir").toInt();  // 2=FWD 3=BACK 4=TURN_L
+  int ms  = server.arg("ms").toInt();
+  int spd = server.arg("s").toInt(); if(spd<=0) spd=700;
+  const char* names[]={"","","FWD","BACK","TURN_L"};
+  const char* lbl = (dir>=2&&dir<=4) ? names[dir] : "DRIVE";
+  logEvent("SLAVE "+String(lbl)+" ("+String(dir)+"p) spd="+String(spd)+" duration="+String(ms/1000)+"s");
+  sendToSlave((uint8_t)dir, spd);
+  delay(ms);
+  sendToSlave(6);  // STOP
+  logEvent("SLAVE STOP (6p)");
+  server.send(200,"text/plain",String(lbl)+" "+String(ms/1000)+"s done");
+}
+
 void handleExtendTimed() {
   int ms = server.arg("ms").toInt();
   logEvent("MOTION EXTEND (2p) duration="+String(ms/1000)+"s");
@@ -941,6 +976,7 @@ void setup() {
   server.on("/nav_stop",  handleNavStop);
   server.on("/replay",     handleReplay);
   server.on("/stopreplay", handleStopReplay);
+  server.on("/drive_timed",    handleDriveTimed);
   server.on("/extend_timed",   handleExtendTimed);
   server.on("/retract_timed",  handleRetractTimed);
   server.on("/actuator_timed", handleActuatorTimed);
