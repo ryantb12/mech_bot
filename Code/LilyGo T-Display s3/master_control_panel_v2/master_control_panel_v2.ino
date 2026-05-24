@@ -286,6 +286,17 @@ const char HTML[] PROGMEM = R"rawliteral(
   #log{background:#050510;border-radius:8px;padding:8px;font-family:monospace;font-size:.72em;height:160px;overflow-y:auto;color:#00ff88;white-space:pre;margin-top:8px}
 </style></head><body>
 <h1>&#129302; Master Panel v2</h1>
+<button onclick='stopAll()' style='display:block;width:100%;padding:18px;background:#d63031;color:#fff;border:none;border-radius:12px;font-size:1.2em;font-weight:bold;margin-bottom:10px;cursor:pointer'>&#9632; STOP ALL</button>
+
+<!-- COMPETITION -->
+<div class='card' style='border:2px solid #fdcb6e'>
+  <h2 style='color:#fdcb6e'>&#127942; Competition Routine</h2>
+  <p style='font-size:.8em;color:#aaa;margin-bottom:10px'>Runs full hardcoded sequence (~90s). Page freezes during run — this is normal.</p>
+  <button class='btn full' id='comp_btn' style='background:#fdcb6e;color:#0d0d1a;padding:20px;font-size:1.1em;font-weight:bold;margin-bottom:8px' onclick='startComp()'>&#9654; PHASE 1</button>
+  <div class='status' id='comp_status' style='margin-bottom:8px'>Ready — press to begin</div>
+  <button class='btn full' id='comp2_btn' style='background:#e17055;color:#fff;padding:20px;font-size:1.1em;font-weight:bold;margin-bottom:8px' onclick='startComp2()'>&#9654; PHASE 2</button>
+  <div class='status' id='comp2_status'>Ready — press to begin</div>
+</div>
 
 <!-- SENSORS -->
 <div class='card'>
@@ -752,6 +763,33 @@ function startRangeCheck(){
   requestAnimationFrame(animate);
 }
 
+function startComp(){
+  const btn=document.getElementById('comp_btn');
+  btn.disabled=true; btn.style.opacity='0.5'; btn.innerText='Running...';
+  document.getElementById('comp_status').innerText='Running (~90s) — page will be unresponsive';
+  fetch('/competition').then(r=>r.text()).then(t=>{
+    document.getElementById('comp_status').innerText='Done!';
+    btn.disabled=false; btn.style.opacity='1'; btn.innerHTML='&#9654; START COMPETITION';
+  }).catch(()=>{
+    document.getElementById('comp_status').innerText='Complete (connection closed during run — normal)';
+    btn.disabled=false; btn.style.opacity='1'; btn.innerHTML='&#9654; START COMPETITION';
+  });
+}
+function stopAll(){
+  fetch('/stopall').then(r=>r.text()).then(t=>stat(t)).catch(()=>{});
+}
+function startComp2(){
+  const btn=document.getElementById('comp2_btn');
+  btn.disabled=true; btn.style.opacity='0.5'; btn.innerText='Running...';
+  document.getElementById('comp2_status').innerText='Running (~30s) — page will be unresponsive';
+  fetch('/competition2').then(r=>r.text()).then(t=>{
+    document.getElementById('comp2_status').innerText='Done!';
+    btn.disabled=false; btn.style.opacity='1'; btn.innerHTML='&#9654; PHASE 2';
+  }).catch(()=>{
+    document.getElementById('comp2_status').innerText='Complete (connection closed — normal)';
+    btn.disabled=false; btn.style.opacity='1'; btn.innerHTML='&#9654; PHASE 2';
+  });
+}
 function clearLog(){
   fetch('/clearlog').then(()=>{
     recActive=false; clearInterval(logPoll);
@@ -766,7 +804,7 @@ function clearLog(){
 float lastNavError = 0, lastPidOut = 0;
 
 // ── Server handlers ───────────────────────────────────
-void handleRoot()    { server.send(200,"text/html",HTML); }
+void handleRoot()    { server.send_P(200, "text/html", HTML); }
 
 void handleSensors() {
   float navErr = homeSet ? normalizeAngle(homeYaw - yawAngle) : 0;
@@ -939,6 +977,126 @@ void handleDownload() {
   server.send(200,"text/plain",logBuf);
 }
 
+// ── Competition routine ───────────────────────────────
+void handleCompetition() {
+  server.send(200, "text/plain", "Running...");
+  Serial.println("=== COMPETITION START ===");
+
+  sendFlipAbsolute(52);  delay(800);
+
+  sendMotionBurst(2); delay(3000); sendMotionBurst(3);  delay(500);
+
+  sendToSlave(8); delay(5000); sendToSlave(9); delay(300);
+  sendToSlave(8); delay(3000); sendToSlave(9); delay(300);
+  sendToSlave(8); delay(1000); sendToSlave(9); delay(500);
+
+  sendFlipAbsolute(60);  delay(2000);
+  sendFlipAbsolute(70);  delay(2000);
+  sendFlipAbsolute(80);  delay(2000);
+  sendFlipAbsolute(90);  delay(2000);
+  sendFlipAbsolute(100); delay(500);
+
+  sendToSlave(8); delay(1000); sendToSlave(9); delay(500);
+  sendFlipAbsolute(105); delay(2000);
+  sendFlipAbsolute(110); delay(2000);
+  sendFlipAbsolute(115); delay(2000);
+  sendFlipAbsolute(120); delay(2000);
+  sendFlipAbsolute(130); delay(500);
+
+  sendToSlave(8); delay(1000); sendToSlave(9); delay(500);
+  sendMotionBurst(2); delay(3000); sendMotionBurst(3); delay(1000);
+  sendMotionBurst(2); delay(1000); sendMotionBurst(3); delay(500);
+
+  sendToSlave(8); delay(1000); sendToSlave(9); delay(500);
+  sendFlipAbsolute(135); delay(2000);
+  sendFlipAbsolute(140); delay(500);
+
+  sendMotionBurst(4); delay(1300); sendMotionBurst(3); delay(1000);
+
+  sendFlipAbsolute(145); delay(1500);
+  sendFlipAbsolute(150); delay(1500);
+  sendFlipAbsolute(155); delay(1500);
+  sendFlipAbsolute(160); delay(1500);
+  sendFlipAbsolute(165); delay(1500);
+  sendFlipAbsolute(170); delay(500);
+
+  sendToSlave(7); delay(3000); sendToSlave(9); delay(1000);
+  sendToSlave(7); delay(3000); sendToSlave(9); delay(1000);
+
+  sendFlipAbsolute(160);
+
+  Serial.println("=== COMPETITION DONE ===");
+}
+
+void handleStopAll() {
+  server.send(200, "text/plain", "All stopped");
+  sendToSlave(6);          // slave motors stop
+  sendToSlave(9);          // slave actuator stop
+  sendMotionBurst(3);      // motion extender stop
+  sendMotionBurst(8);      // motion all neutral
+}
+
+// ── Competition Phase 2 ───────────────────────────────
+// From recorded log — ~40s dead gap removed, settling delays kept.
+void handleCompetition2() {
+  server.send(200, "text/plain", "Running...");
+  Serial.println("=== COMPETITION PHASE 2 START ===");
+
+  // 1. Actuator up briefly
+  sendToSlave(7); delay(3000); sendToSlave(9);
+  delay(500);
+
+  // 2. Back 0.9s
+  sendToSlave(3, 472); delay(900); sendToSlave(6);
+  delay(500);
+
+  // 3. Turn left 0.8s
+  sendToSlave(4, 500); delay(700); sendToSlave(6);
+  delay(500);
+
+  // 4. Forward 1s
+  sendToSlave(2, 472); delay(1000); sendToSlave(6);
+  delay(500);
+
+  // 5. Forward 1s
+  sendToSlave(2, 472); delay(1000); sendToSlave(6);
+  delay(500);
+
+  // 6. Turn left 0.9s
+  sendToSlave(4, 500); delay(900); sendToSlave(6);
+  delay(500);
+
+  // 7. Extend arm — 6× 1s pulses
+  for (int i = 0; i < 6; i++) {
+    sendMotionBurst(2); delay(1000); sendMotionBurst(3);
+    delay(500);
+  }
+
+  // 8. Forward 2s
+  sendToSlave(2, 472); delay(2000); sendToSlave(6);
+  delay(500);
+
+
+  // 10. Forward 1s
+  sendToSlave(2, 472); delay(1000); sendToSlave(6);
+  delay(500);
+
+  // 11. Claw to 70°
+  sendFlipAbsolute(70);
+  delay(1000);
+
+    for (int i = 0; i < 3; i++) {
+  sendFlipAbsolute(70);
+  delay(200);
+  }
+  sendFlipAbsolute(80);
+  delay(1000);
+  // 12. Back 1s
+  sendToSlave(3, 472); delay(100); sendToSlave(6);
+
+  Serial.println("=== COMPETITION PHASE 2 DONE ===");
+}
+
 // ── Setup ─────────────────────────────────────────────
 void setup() {
   pinMode(15,OUTPUT); digitalWrite(15,HIGH);
@@ -984,7 +1142,10 @@ void setup() {
   server.on("/record",    handleRecord);
   server.on("/log",       handleLog);
   server.on("/clearlog",  handleClearLog);
-  server.on("/download",  handleDownload);
+  server.on("/download",     handleDownload);
+  server.on("/stopall",      handleStopAll);
+  server.on("/competition",  handleCompetition);
+  server.on("/competition2", handleCompetition2);
   server.begin();
 
   tft.init(); tft.setRotation(1); tft.fillScreen(TFT_LIGHTGREY);

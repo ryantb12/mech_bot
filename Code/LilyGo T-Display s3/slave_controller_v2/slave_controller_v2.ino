@@ -74,7 +74,12 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
 
 // Linear actuator 2 — runs in sync with actuator 1
 #define LA2_In1 13   // TTGO spare
-#define LA2_En  12   // TTGO spare
+#define LA2_In2 14   // TTGO spare — dedicated In2 (wire to motor driver In2)
+#define LA2_En  12   // TTGO spare — LEDC channel 4
+
+// Set true if actuator 2 is physically mounted reversed and goes the wrong way
+#define LA2_FLIP  false
+#define LA2_EN_CH 4   // LEDC channel for LA2 enable (1=LM, 3=RM, 4=LA2)
 
 // ===================================================
 // SPEEDS (0–1023 for 10-bit PWM)
@@ -159,17 +164,27 @@ void setMotor(Motor m, int dir, int spd) {
 }
 
 // direction: 1=raise, -1=lower, 0=stop
-// Actuator 2 (GPIO 13/12) runs in sync — same direction, shared In2 (GPIO 2)
+// LA2_FLIP inverts actuator 2 if it is physically mounted reversed
 void setActuator(LinearAct l, int dir) {
+  int la2dir = LA2_FLIP ? -dir : dir;
+
   if (dir == 1) {
     digitalWrite(l.in1, HIGH); digitalWrite(l.in2, LOW);  digitalWrite(l.en, HIGH);
-    digitalWrite(LA2_In1, HIGH); digitalWrite(LA2_En, HIGH);
   } else if (dir == -1) {
     digitalWrite(l.in1, LOW);  digitalWrite(l.in2, HIGH); digitalWrite(l.en, HIGH);
-    digitalWrite(LA2_In1, LOW);  digitalWrite(LA2_En, HIGH);
   } else {
     digitalWrite(l.in1, LOW);  digitalWrite(l.in2, LOW);  digitalWrite(l.en, LOW);
-    digitalWrite(LA2_In1, LOW);  digitalWrite(LA2_En, LOW);
+  }
+
+  if (la2dir == 1) {
+    digitalWrite(LA2_In1, HIGH); digitalWrite(LA2_In2, LOW);
+    ledcWrite(LA2_EN_CH, ACT_SPEED);
+  } else if (la2dir == -1) {
+    digitalWrite(LA2_In1, LOW);  digitalWrite(LA2_In2, HIGH);
+    ledcWrite(LA2_EN_CH, ACT_SPEED);
+  } else {
+    digitalWrite(LA2_In1, LOW);  digitalWrite(LA2_In2, LOW);
+    ledcWrite(LA2_EN_CH, 0);
   }
 }
 
@@ -246,8 +261,11 @@ void setup() {
   motorSetup(leftMotor);
   motorSetup(rightMotor);
   pinMode(LA_In1, OUTPUT); pinMode(LA_In2, OUTPUT); pinMode(LA_En, OUTPUT);
-  pinMode(LA2_In1, OUTPUT); pinMode(LA2_En, OUTPUT);
-  digitalWrite(LA2_In1, LOW); digitalWrite(LA2_En, LOW);
+  pinMode(LA2_In1, OUTPUT); pinMode(LA2_In2, OUTPUT);
+  digitalWrite(LA2_In1, LOW); digitalWrite(LA2_In2, LOW);
+  ledcSetup(LA2_EN_CH, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(LA2_En, LA2_EN_CH);
+  ledcWrite(LA2_EN_CH, 0);
   stopAll();
 
   tft.init(); tft.setRotation(1); tft.fillScreen(TFT_LIGHTGREY);
